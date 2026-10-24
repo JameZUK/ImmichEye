@@ -33,6 +33,7 @@ class Settings:
     cpai_fallback: bool = False      # on failure, let CodeProject.AI answer (most of its names are wrong)
     cpai_sync: str = "managed"       # off | managed | exclusive: see cpai_sync.py
     cpai_prototypes: int = 4         # CodeProject.AI userids per person (label1..labelN)
+    save_faces: int = 0              # keep crops of the last N recognised-or-not faces (0 = off)
 
 
 def load() -> Settings:
@@ -62,4 +63,5 @@ def load() -> Settings:
         cpai_fallback=_env("IMMICHEYE_CPAI_FALLBACK", "0") not in ("0", "false", "no"),
         cpai_sync=sync,
         cpai_prototypes=int(_env("IMMICHEYE_CPAI_PROTOTYPES", "4")),
+        save_faces=int(_env("IMMICHEYE_SAVE_FACES", "0")),
     )

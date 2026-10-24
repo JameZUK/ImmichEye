@@ -121,6 +121,29 @@ def log_recognition(entry: dict) -> None:
         log.exception("could not write recognition log")
 
 
+def save_face_crops(jpeg: bytes, entry: dict) -> None:
+    """Keep each face Blue Iris sent (with context) for checking results; newest N only."""
+    if not settings.save_faces or not entry["faces"]:
+        return
+    out = settings.data_dir / "faces"
+    try:
+        out.mkdir(parents=True, exist_ok=True)
+        img = Image.open(io.BytesIO(jpeg)).convert("RGB")
+        stamp = time.strftime("%Y%m%d-%H%M%S", time.localtime(entry["ts"])) + f"-{int(entry['ts'] * 1000) % 1000:03d}"
+        for i, f in enumerate(entry["faces"]):
+            x1, y1, x2, y2 = f["box"]
+            m = max(x2 - x1, y2 - y1) // 2
+            crop = img.crop((max(0, x1 - m), max(0, y1 - m), min(img.width, x2 + m), min(img.height, y2 + m)))
+            score = f["top"][0][1] if f["top"] else 0
+            name = f"{stamp}_{i}_{f['result']}_{f['top'][0][0] if f['top'] else 'none'}-{score:.2f}_{x2 - x1}px.jpg"
+            crop.save(out / name, "JPEG", quality=90)
+            f["crop"] = name
+        for old in sorted(out.glob("*.jpg"))[: -settings.save_faces]:
+            old.unlink()
+    except Exception:
+        log.exception("could not save face crops")
+
+
 @app.post("/v1/vision/face/recognize")
 async def recognize(request: Request) -> Response:
     started = time.perf_counter()
@@ -174,7 +197,9 @@ async def recognize(request: Request) -> Response:
                        "top": [[m.label, round(m.score, 3)] for m in matches[:3]],
                        "result": predictions[-1]["userid"]})
 
-    log_recognition({**entry, "ms": inference_ms, "faces": logged})
+    entry.update(ms=inference_ms, faces=logged)
+    save_face_crops(jpeg, entry)
+    log_recognition(entry)
     return cpai_envelope({
         "message": "A face was recognised" if found_known else "No known faces",
         "count": len(predictions),

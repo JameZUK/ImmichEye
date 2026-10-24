@@ -191,3 +191,12 @@ def test_cpai_sync(tmp_path, mode):
     assert deleted == (["eve1"] if mode == "managed" else ["Cal2", "Dan4", "eve1"])
     state = json.loads((tmp_path / "cpai_sync.json").read_text())
     assert sorted(state) == ["cal1", "cal3"]
+
+
+def test_saves_face_crops(client, monkeypatch, tmp_path):
+    monkeypatch.setattr(server, "settings", dataclasses.replace(server.settings, data_dir=tmp_path, save_faces=1))
+    server.app.state.ml = FakeML([Face((10, 20, 50, 70), 0.9, unit(0.1, 1))])
+    post(client)
+    post(client)
+    crops = list((tmp_path / "faces").glob("*.jpg"))
+    assert len(crops) == 1 and "_cal_cal-" in crops[0].name and crops[0].name.endswith("_40px.jpg")

@@ -145,7 +145,10 @@ ImmichEye's weaker matches.
 
 ## Tuning
 
-Every recognition is logged to `data/recognitions.jsonl` with each face's top three scores.
+Every recognition request is logged to `data/recognitions.jsonl` with the frame size and each
+face's box and top three scores. Set `IMMICHEYE_SAVE_FACES=500` to also keep crops of the last
+500 faces in `data/faces`, named with the result, best match, score and face width, to see what
+your cameras actually capture.
 
 ```sh
 # How a particular frame scores
