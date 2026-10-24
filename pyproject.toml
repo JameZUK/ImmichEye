@@ -1,0 +1,23 @@
+[project]
+name = "immicheye"
+version = "0.1.0"
+description = "Immich-quality face recognition for Blue Iris, as a CodeProject.AI-compatible face module"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "fastapi>=0.115",
+    "uvicorn[standard]>=0.30",
+    "httpx>=0.27",
+    "numpy>=1.26",
+    "pillow>=10.0",
+    "python-multipart>=0.0.9",
+]
+
+[project.optional-dependencies]
+test = ["pytest>=8", "respx>=0.21"]
+
+[tool.setuptools]
+packages = ["immicheye"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

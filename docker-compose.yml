@@ -1,0 +1,27 @@
+services:
+  immicheye:
+    build: .
+    container_name: immicheye
+    restart: unless-stopped
+    env_file: .env
+    volumes:
+      - ./data:/data
+    # Status, explain and refresh endpoints. Keep this off untrusted networks:
+    # they are unauthenticated. Remove the mapping if you don't need them.
+    ports:
+      - "${IMMICHEYE_ADMIN_BIND:-127.0.0.1}:${IMMICHEYE_ADMIN_PORT:-8000}:8000"
+
+  router:
+    image: nginx:1.29-alpine
+    container_name: immicheye-router
+    restart: unless-stopped
+    depends_on: [immicheye]
+    environment:
+      CPAI_UPSTREAM: ${CPAI_UPSTREAM:?set CPAI_UPSTREAM in .env, e.g. 192.0.2.10:32168}
+      IMMICHEYE_CPAI_FALLBACK: ${IMMICHEYE_CPAI_FALLBACK:-0}
+      NGINX_ENVSUBST_FILTER: "CPAI_UPSTREAM|IMMICHEYE_CPAI_FALLBACK"
+    volumes:
+      - ./nginx/default.conf.template:/etc/nginx/templates/default.conf.template:ro
+    # Point Blue Iris's AI server port at this.
+    ports:
+      - "${IMMICHEYE_PORT:-32170}:8080"

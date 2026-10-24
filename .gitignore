@@ -1,0 +1,9 @@
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+# Site-specific settings and deployment files never belong in the repo
+.env
+data/
+deploy/local/
+*.egg-info/
