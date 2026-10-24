@@ -133,6 +133,16 @@ def test_gallery_from_cache(tmp_path):
     assert g.match(unit(0, 1), 3)[0].label == "cal"
 
 
+@respx.mock
+def test_delete_and_register_never_reach_cpai(client):
+    cpai = respx.route(host="cpai.test").respond(json={"success": True})
+    assert client.post("/v1/vision/face/delete", data={"userid": "cal"}).json()["success"] is True
+    reg = client.post("/v1/vision/face/register", data={"userid": "cal"},
+                      files={"image": ("x.jpg", jpeg(), "image/jpeg")}).json()
+    assert reg["success"] is False and "Immich" in reg["error"]
+    assert not cpai.called
+
+
 def test_list(client):
     body = client.post("/v1/vision/face/list").json()
     assert body["success"] is True and body["faces"] == ["bea", "cal"]

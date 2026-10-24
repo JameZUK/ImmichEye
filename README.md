@@ -88,9 +88,13 @@ Immich is the only source of faces. People are managed there, never in Blue Iris
   people share a first name (`cal_smith`). Override them with `IMMICHEYE_NAME_MAP`, e.g.
   `{"Evelyn Mary Jones": "eve"}`. Unmerged duplicates with the same name pool their faces. Merge
   misspelt duplicates in Immich, or map them to one label.
-- **Training faces in Blue Iris.** Don't. The router passes register and delete through to
-  CodeProject.AI, but ImmichEye never uses those faces. With `IMMICHEYE_CPAI_SYNC=exclusive`,
-  the next sync removes them.
+- **Blue Iris can't change faces.** ImmichEye answers Blue Iris's face register and delete
+  calls itself, and they never reach CodeProject.AI. Registering is refused ("Faces are managed
+  in Immich"). Deleting is acknowledged and ignored. This matters because opening Blue Iris's
+  faces view sends a delete for every server face that isn't in Blue Iris's own faces folder.
+  Passed through, that would wipe CodeProject.AI's synced faces. Only ever open that view while
+  Blue Iris points at the router: pointed straight at CodeProject.AI, it will still delete them.
+  With `managed` or `exclusive` sync, the next refresh puts them back.
 
 ## CodeProject.AI's face database
 

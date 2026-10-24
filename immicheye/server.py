@@ -182,6 +182,25 @@ async def list_faces() -> Response:
     return cpai_envelope({"success": True, "faces": state["gallery"].labels}, "list", started)
 
 
+@app.post("/v1/vision/face/delete")
+async def delete_face(request: Request) -> Response:
+    """Acknowledged, never done. Blue Iris's faces view deletes every server face that isn't in
+    its own faces folder, so passing this on would wipe CodeProject.AI's synced faces.
+    Faces are managed in Immich."""
+    started = time.perf_counter()
+    userid = (await request.form()).get("userid")
+    log.info("ignored face delete from Blue Iris: %s", userid)
+    return cpai_envelope({"success": True}, "delete", started)
+
+
+@app.post("/v1/vision/face/register")
+async def register_face(request: Request) -> Response:
+    started = time.perf_counter()
+    userid = (await request.form()).get("userid")
+    log.info("refused face register from Blue Iris: %s", userid)
+    return cpai_envelope({"success": False, "error": "Faces are managed in Immich (ImmichEye)"}, "register", started)
+
+
 @app.get("/immicheye/status")
 async def status() -> dict:
     g: Gallery = state["gallery"]

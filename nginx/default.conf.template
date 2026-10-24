@@ -1,4 +1,4 @@
-# Blue Iris points its AI server at this. Face recognition goes to ImmichEye;
+# Blue Iris points its AI server at this. Face recognition and face management go to ImmichEye;
 # everything else (object detection, plates, the status page) goes straight to
 # CodeProject.AI untouched. If ImmichEye is down, face calls get a "no face" reply,
 # or with IMMICHEYE_CPAI_FALLBACK=1 go to CodeProject.AI.
@@ -21,7 +21,9 @@ server {
     resolver 127.0.0.11 valid=10s ipv6=off;
     set $faces http://immicheye:8000;
 
-    location ~ ^/v1/vision/face/(recognize|list)$ {
+    # delete/register are answered by ImmichEye and never reach CodeProject.AI: Blue Iris's
+    # faces view deletes every face it doesn't have locally.
+    location ~ ^/v1/vision/face/(recognize|list|delete|register)$ {
         proxy_pass $faces;
         proxy_connect_timeout 2s;
         proxy_read_timeout 30s;
@@ -30,6 +32,10 @@ server {
     }
 
     location @faces_fallback_1 {
+        # Only recognition may fall back: a delete or register must never reach CodeProject.AI.
+        if ($uri !~ /recognize$) {
+            return 200 '{"success":false,"error":"ImmichEye unavailable","code":500,"moduleId":"FaceProcessing"}';
+        }
         proxy_pass http://cpai;
     }
 
