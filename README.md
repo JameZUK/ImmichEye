@@ -158,6 +158,10 @@ curl -F image=@frame.jpg http://127.0.0.1:8000/immicheye/explain
 set -a; . ./.env; set +a; IMMICHEYE_DATA=./data python scripts/evaluate.py [--cpai] [--min-px 30 --max-px 60]
 ```
 
+Face detection needs a confidence of `IMMICHEYE_DETECT_MIN_SCORE` (default 0.70, Immich's own
+default). On real CCTV, clear faces detect at about 0.8 and the backs and tops of heads at
+0.5-0.6, so lowering it mostly adds "unknown" faces that aren't faces.
+
 Defaults: threshold 0.40 (cosine), margin 0.05. If people you know come back `unknown`, lower
 the threshold a little. If you see wrong names, raise it or the margin.
 

@@ -55,7 +55,7 @@ def load() -> Settings:
         faces_per_person=int(_env("IMMICHEYE_FACES_PER_PERSON", "40")),
         min_face_px=int(_env("IMMICHEYE_MIN_FACE_PX", "60")),
         refresh_minutes=int(_env("IMMICHEYE_REFRESH_MINUTES", "360")),
-        detect_min_score=float(_env("IMMICHEYE_DETECT_MIN_SCORE", "0.5")),
+        detect_min_score=float(_env("IMMICHEYE_DETECT_MIN_SCORE", "0.7")),
         match_threshold=float(_env("IMMICHEYE_MATCH_THRESHOLD", "0.40")),
         match_margin=float(_env("IMMICHEYE_MATCH_MARGIN", "0.05")),
         top_k=int(_env("IMMICHEYE_TOP_K", "3")),
