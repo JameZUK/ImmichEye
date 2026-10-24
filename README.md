@@ -2,183 +2,395 @@
 
 Give Blue Iris access to Immich for facial recognition.
 
-Blue Iris's face recognition (through CodeProject.AI's Face Processing module) is weak.
-Immich's is excellent, and you've already named everyone in it. ImmichEye gives Blue Iris
-Immich's recognition, with Immich as the only source of faces. There's no training in Blue Iris
-and no double bookkeeping. Name, merge or fix someone in Immich, and Blue Iris knows after the
-next refresh.
+Blue Iris's face recognition through CodeProject.AI's Face Processing module is weak. Immich's
+is excellent, and you've probably already named everyone in it. ImmichEye gives Blue Iris
+Immich's recognition, with Immich as the only place faces are managed. You don't train faces in
+Blue Iris and nothing has to be kept in step by hand. Name, merge or fix someone in Immich, and
+Blue Iris knows after the next refresh.
+
+- **Better recognition.** It uses the same face model as Immich (InsightFace `buffalo_l`),
+  compared against each person's best recent photos. On held-out faces it named 86–97% of people
+  correctly and 1–2.5% wrongly, against CodeProject.AI's 41–52% correct and 45–53% wrong (see
+  [Accuracy](#accuracy)).
+- **One source of truth.** People are managed in Immich only. Blue Iris can't add or delete faces.
+- **Drop-in.** Blue Iris sees an ordinary CodeProject.AI server. Object detection, plates and
+  custom models carry on exactly as before.
+- **Read-only to Immich.** The API key needs only four read permissions.
+
+## Contents
+
+- [How it works](#how-it-works)
+- [Requirements](#requirements)
+- [Installation](#installation)
+- [Configuring Blue Iris](#configuring-blue-iris)
+- [Managing people](#managing-people)
+- [CodeProject.AI's face database](#codeprojectais-face-database)
+- [When ImmichEye or Immich ML is down](#when-immicheye-or-immich-ml-is-down)
+- [Accuracy](#accuracy)
+- [Tuning](#tuning)
+- [Settings reference](#settings-reference)
+- [Admin endpoints](#admin-endpoints)
+- [Troubleshooting](#troubleshooting)
+- [Updating](#updating)
+- [Development](#development)
+- [Privacy](#privacy)
 
 ## How it works
 
 ```
-Blue Iris ──► router (nginx) ─┬─ /v1/vision/face/recognize, /face/list ──► ImmichEye ──► Immich ML /predict
-                              │                                              │
-                              └─ everything else ──► CodeProject.AI ◄─sync── └─ gallery built from the Immich API
+                        ┌─ face/recognize, face/list ───► ImmichEye ──► Immich ML /predict
+Blue Iris ──► router ───┼─ face/register, face/delete ──► ImmichEye (refused / ignored)
+              (nginx)   └─ everything else ─────────────► CodeProject.AI
+                                                              ▲
+                                     ImmichEye ── sync ───────┘
+                                         ▲
+                                         └── gallery built from the Immich API
 ```
 
-- **Router.** Blue Iris's AI server setting points at the router instead of CodeProject.AI.
-  Object detection, plates and everything else pass straight through to CodeProject.AI,
-  untouched. Only the face calls are diverted. The router keeps serving object detection even
-  while ImmichEye is down.
-- **Gallery.** For every named person in Immich, ImmichEye takes the largest faces among their
-  most recent photos, crops them from Immich's previews, and embeds them with the same model
-  Immich uses (InsightFace `buffalo_l` by default) via the Immich machine-learning server.
-  Embeddings are cached, so a refresh only embeds new faces, and a restart serves from the cache
-  straight away.
-- **Recognition.** Each frame Blue Iris sends goes through Immich ML for detection and
-  embedding. Each face is scored against every person: the mean cosine similarity of their
-  best few reference faces. A person is reported when they clear a threshold and beat the
-  runner-up by a margin. Replies use CodeProject.AI's exact format, so Blue Iris (and
-  anything reading its alert memos) sees ordinary face labels.
-- **CodeProject.AI sync.** After each refresh, ImmichEye also registers the same people in
-  CodeProject.AI's own face database (see [below](#codeprojectais-face-database)). That way
-  CodeProject.AI knows the same people as Immich if Blue Iris is ever pointed back at it directly.
+ImmichEye runs as two containers next to your existing CodeProject.AI server.
 
-## Accuracy
+**The router** (nginx) is what Blue Iris talks to. Blue Iris sends every AI request, for objects,
+plates, custom models and faces, to one server. The router passes everything to
+CodeProject.AI untouched except the face calls, which go to ImmichEye. The router finds ImmichEye
+on each request rather than once at startup, so object detection keeps working even while
+ImmichEye is stopped.
 
-Measured with `scripts/evaluate.py` on one real library (52 people, 2,178 reference faces).
-The test faces are held-out Immich faces the gallery didn't use, with the settings below
-(threshold 0.40, margin 0.05). Each face counts as correct, wrong, or unknown:
+**The gallery** is ImmichEye's set of reference faces. For each named person in Immich it:
 
-| Test faces | | ImmichEye | CodeProject.AI, same people synced |
-|---|---|---|---|
-| Small, 30–60 px (most like CCTV) | correct / **wrong** / unknown | 86% / **2.5%** / 11% | 41% / **53%** / 7% |
-| Larger, 80–400 px | correct / **wrong** / unknown | 97% / **1.2%** / 2% | 52% / **45%** / 3% |
+1. finds their most recent photos (default 250);
+2. picks their largest faces among those (default 40, at least 60 px), so the references show
+   how people look now and have enough detail;
+3. crops each face, with some surrounding context, from Immich's preview image;
+4. turns each crop into an embedding with the Immich machine-learning server. An embedding is a
+   list of 512 numbers describing the face, made by the same model Immich uses.
 
-CodeProject.AI's numbers are at Blue Iris's usual minimum confidence of 0.40. Raising it cuts
-wrong names and right ones together: at 0.80 it gets 20% right and 8% wrong on larger faces.
-Run the script against your own library: results depend on your photos and cameras. Part of the
-"wrong" share is usually the library's own duplicates, the same person under two names in Immich.
+Embeddings are cached by Immich face id, so a refresh (every 6 hours by default) only processes
+faces it hasn't seen before. A restart uses the cache straight away.
+
+**Recognition.** When Blue Iris detects a person, it sends the frame to `face/recognize`.
+ImmichEye passes the frame to Immich ML, which finds every face and makes an embedding for each.
+Each face is then compared with every person in the gallery:
+
+- A person's score is the average similarity of their three closest reference faces (cosine
+  similarity: 1 means identical, about 0.2 is a stranger).
+- The best-scoring person is named if their score reaches the threshold (0.40) **and** beats
+  the runner-up by a margin (0.05). Otherwise the face is `unknown`.
+
+The reply uses CodeProject.AI's exact format, so Blue Iris shows the name on the alert, in the
+alert memo (e.g. `cal_smith:78%`) and to anything that reads it.
+
+**Face management.** Blue Iris's own face training would otherwise go to CodeProject.AI.
+ImmichEye answers those calls itself: `register` is refused and `delete` is acknowledged but
+ignored. See [Managing people](#managing-people) for why the deletes matter.
+
+**CodeProject.AI sync.** After each refresh, ImmichEye registers the same people in
+CodeProject.AI's own face database. If you ever point Blue Iris straight back at CodeProject.AI,
+it knows the same people, using its own weaker matching.
 
 ## Requirements
 
-- Blue Iris using CodeProject.AI (tested with CPAI 2.9 and Face Processing 1.12).
-- Immich with facial recognition enabled (built against Immich 3.3) and people named.
-- Network access from ImmichEye to the Immich server, the Immich machine-learning container
-  (port 3003, which isn't always published), and CodeProject.AI.
+- **Blue Iris** using **CodeProject.AI** as its AI provider. Tested with Blue Iris 6, CodeProject.AI
+  2.9 and Face Processing 1.12. Blue Iris 6's built-in AI isn't supported; see
+  [Troubleshooting](#troubleshooting).
+- **Immich** with facial recognition enabled and the people you care about named. Built against
+  Immich 3.3.
+- **Immich's machine-learning container reachable over the network** from wherever ImmichEye
+  runs, on port 3003. A standard Immich install doesn't publish it outside Docker, so you may
+  need to add a port mapping to `immich-machine-learning`. ImmichEye only uses it for face
+  detection and embeddings, the same work Immich does with it.
+- **Docker** with Compose on any machine that can reach Immich, Immich ML and CodeProject.AI.
+  Running it on the CodeProject.AI host is simplest.
 
-## Setup
+## Installation
 
-1. In Immich, go to **Account Settings → API Keys** and create a key with only these permissions:
-   `person.read`, `asset.read`, `face.read`, `asset.view`. ImmichEye never writes to Immich.
-2. Configure and start:
+1. **Create an Immich API key.** In Immich, open **Account Settings → API Keys** and create a key
+   with only these permissions: `person.read`, `asset.read`, `face.read`, `asset.view`.
+   ImmichEye never writes to Immich. Use the account that owns the photos and named people.
+2. **Configure.**
    ```sh
+   git clone https://github.com/JameZUK/ImmichEye.git immicheye && cd immicheye
    cp .env.example .env      # fill in the URLs and the API key
    mkdir -p data
-   docker compose up -d --build
-   docker compose logs -f immicheye    # wait for "gallery: N people, M faces"
    ```
-3. Check: `curl http://127.0.0.1:8000/immicheye/status`
-4. In Blue Iris, open **Settings → AI** and change the server port (and host, if ImmichEye
-   runs on a different machine) to the router's port (`IMMICHEYE_PORT`, default 32170).
-5. **Send the main stream to the AI.** In each camera's AI settings, enable using the main
-   stream (high-resolution images) for analysis. Faces in a sub-stream frame are often only
-   a few pixels wide. No model can recognise those.
+   At minimum set `IMMICH_URL`, `IMMICH_API_KEY`, `IMMICH_ML_URL`, `CPAI_URL` and
+   `CPAI_UPSTREAM`. Every setting is described in [Settings reference](#settings-reference).
+3. **Start.**
+   ```sh
+   docker compose up -d --build
+   docker compose logs -f immicheye
+   ```
+   Wait for `gallery: N people, M faces`. The first build embeds every reference face, which
+   takes a minute or two for about 50 people on a GPU. Then wait for `CodeProject.AI sync`.
+4. **Check.**
+   ```sh
+   curl http://127.0.0.1:8000/immicheye/status
+   ```
+   You should see your people under `faces_per_label`, and `last_error` should be null.
+5. **Point Blue Iris at the router.** See below.
 
-To undo, point Blue Iris back at CodeProject.AI's own port.
+## Configuring Blue Iris
 
-## Managing faces
+These are the settings that matter, from the Blue Iris 6 help (AI chapter) and testing. Exact
+names and locations may differ slightly between Blue Iris versions.
 
-Immich is the only source of faces. People are managed there, never in Blue Iris.
+### Global: Settings → AI
 
-- **Who is recognised.** By default, every named, non-hidden person. `IMMICHEYE_PEOPLE` limits
-  recognition to a comma-separated list of names. Use it to recognise your household and regular
-  visitors, not everyone in your photo library: fewer people means fewer false matches.
-- **Labels** are lower case with underscores between words, which is what Blue Iris and Caesa
-  handle reliably. With `IMMICHEYE_LABELS=first` (the default), a label is the first name
-  (`cal`), or the full name where two different people share a first name (`cal_smith`). With
-  `IMMICHEYE_LABELS=full`, it's always the full name: `cal_smith`, or `cal_smith_dad` for
-  "Cal Smith (Dad)". Override particular people with `IMMICHEYE_NAME_MAP`, e.g.
-  `{"Evelyn Mary Jones": "eve"}`. Changing labels renames the synced CodeProject.AI faces at the
-  next refresh. Unmerged duplicates with the same name pool their faces. Merge
-  misspelt duplicates in Immich, or map them to one label.
-- **Blue Iris can't change faces.** ImmichEye answers Blue Iris's face register and delete
-  calls itself, and they never reach CodeProject.AI. Registering is refused ("Faces are managed
-  in Immich"). Deleting is acknowledged and ignored. This matters because opening Blue Iris's
-  faces view sends a delete for every server face that isn't in Blue Iris's own faces folder.
-  Passed through, that would wipe CodeProject.AI's synced faces. Only ever open that view while
-  Blue Iris points at the router: pointed straight at CodeProject.AI, it will still delete them.
-  With `managed` or `exclusive` sync, the next refresh puts them back.
+- **Provider:** CodeProject.AI, as before.
+- **Server port** (and IP, if ImmichEye runs on another machine): the router's port,
+  `IMMICHEYE_PORT` (default **32170**), instead of CodeProject.AI's 32168.
+- **Don't train faces here, and don't import faces from the Faces folder.** Blue Iris "syncs" its
+  own faces folder to the AI server, deleting any server face that isn't in that folder.
+  ImmichEye blocks this, so opening the faces view is harmless. It will show your Immich people.
+
+To undo everything, set the port back to CodeProject.AI's own.
+
+### Per camera: camera properties → Trigger → AI
+
+| Setting | Recommended | Why |
+|---|---|---|
+| **Use main stream if available** | **On** for every camera that should recognise faces | Blue Iris shrinks images to 640×640 for object detection but crops faces from the image it sends. On a sub-stream frame faces are often under 20 px, which no model can recognise. On main stream we saw faces of 90–160 px. The manual: main stream only benefits face and plate recognition. |
+| **Facial recognition** | On; the models box must not contain `faces:0` | `faces:0` in the per-camera models list turns recognition off for that camera. |
+| **To confirm** | `person` plus whatever else matters for that camera | Face recognition runs on detected people, so `person` is all faces need. You don't need face names here. See the example below. |
+| **To cancel** | Face names only if you mean it | A face name here cancels the alert, e.g. no alerts for your own household. With a wildcard (`cal_smith*`) it also matches CodeProject.AI's synced `cal_smith1`…`4`. |
+| **Min. confidence** | **70% or lower** | ImmichEye reports names at 70% and up (72–81% in testing). A camera or label minimum above 70 drops weaker true matches. |
+| **Additional post-trigger images** | 5–10 at 250–500 ms | More images means more chances of a frame where the person faces the camera. Blue Iris prefers the image with the most faces for the alert. |
+| **Zoom-in to objects** | Optional, off is fine | It only changes the saved alert image. It also sends extra face requests on a zoomed image, which in testing held *smaller* faces than the main-stream frames, so it doesn't help recognition. |
+| **Save unknown faces** | Off | Blue Iris's own feature for its built-in AI. ImmichEye ignores that folder and can keep its own crops (`IMMICHEYE_SAVE_FACES`). |
+| **Override server** | Empty | A camera with its own AI server bypasses ImmichEye completely. |
+| **Primary object detection** | On, except for very close-up cameras | Faces are only looked for on detected people. If a camera is so close (a doorbell) that it rarely detects a whole person, turning primary detection off makes Blue Iris search for faces across the whole image. |
+
+**Example "To confirm" lists:**
+
+- Cameras that see a road or drive: `person,car,truck,bus,motorcycle,bicycle,vehicle`.
+  Include `vehicle`: CodeProject.AI's custom `ipcam-*` models label vehicles as `vehicle`, not
+  `car`.
+- A garden camera where vehicles can't appear: `person`, plus `dog`, `cat` etc. if you want
+  animal alerts. Labels a camera can't legitimately see only add false alerts. Leave out `boat`
+  unless a camera actually looks at water.
+
+**Face names in rules** use ImmichEye's labels (see [Labels](#labels)). Add a `*`, as the manual
+suggests, to match both ImmichEye's `cal_smith` and CodeProject.AI's `cal_smith1`…`4`.
+
+**Performance:** every image goes to each model in the camera's list, so trim custom models that a
+camera doesn't need, such as licence plates on a back garden. With main-stream images this is
+real work for CodeProject.AI. It doesn't affect faces.
+
+## Managing people
+
+Immich is the only source of faces. Manage people there: name them, merge duplicates, fix
+wrongly assigned faces. Changes reach Blue Iris at the next refresh, or straight away with
+`POST /immicheye/refresh`.
+
+- **Who is recognised.** By default, every named, non-hidden person in Immich.
+  `IMMICHEYE_PEOPLE` limits recognition to a comma-separated list of Immich names. Your household
+  and regular visitors are a better choice than everyone in a photo library: fewer people means
+  fewer chances of a wrong match.
+- **Duplicates.** Several Immich people with the same name (unmerged clusters) pool their faces
+  under one label. Misspelt duplicates ("Smith" and "Smiht") stay separate labels: merge them in
+  Immich, or map both to one label with `IMMICHEYE_NAME_MAP`.
+- **Quality.** The gallery uses each person's largest recent faces, so a few wrongly assigned
+  faces in Immich matter little. Persistent wrong matches between two people usually mean
+  some of one person's photos are assigned to the other.
+
+### Labels
+
+Labels are the names Blue Iris sees. They're lower case with words joined by underscores, which
+Blue Iris and apps reading its alert memos handle reliably, and never end in a digit (Blue Iris
+treats a trailing number as a registration number: `cal1` is `cal`).
+
+| `IMMICHEYE_LABELS` | "Cal Smith" | "Cal Brown" | "Bea Jones (Mum)" |
+|---|---|---|---|
+| `first` (default) | `cal_smith` | `cal_brown` | `bea` |
+| `full` | `cal_smith` | `cal_brown` | `bea_jones_mum` |
+
+With `first`, a label is the first name unless two different people share it. Override anyone
+with `IMMICHEYE_NAME_MAP`, e.g. `{"Bea Jones (Mum)": "mum"}`. Avoid labels that are also object
+names (`person`, `car`, `dog`…). Blue Iris would confuse them.
+
+### Blue Iris can't change faces
+
+ImmichEye answers Blue Iris's face `register` and `delete` calls itself; they never reach
+CodeProject.AI:
+
+- **Register** is refused with "Faces are managed in Immich (ImmichEye)".
+- **Delete** is acknowledged and ignored.
+
+This matters because **opening Blue Iris's faces view sends a delete for every face on the server
+that isn't in Blue Iris's own faces folder**. Passed through, that would wipe CodeProject.AI's
+synced faces. If Blue Iris is ever pointed straight at CodeProject.AI, don't open that view; if
+you do, the next sync puts the faces back.
 
 ## CodeProject.AI's face database
 
-CodeProject.AI keeps one averaged embedding per name, so ImmichEye registers each person as
-up to `IMMICHEYE_CPAI_PROTOTYPES` (default 4) entries, `cal1`…`cal4`. Each entry averages
-one cluster of similar-looking faces: glasses or not, older or newer photos. Blue Iris and
-Caesa read `cal3` as cal.
+CodeProject.AI keeps one averaged embedding per name. ImmichEye therefore registers each person
+as up to `IMMICHEYE_CPAI_PROTOTYPES` (default 4) entries, `cal_smith1`…`cal_smith4`. Each entry
+averages one cluster of similar-looking faces, such as with and without glasses, or older and
+newer photos.
 
-`IMMICHEYE_CPAI_SYNC` chooses how much of the database ImmichEye owns:
+`IMMICHEYE_CPAI_SYNC` sets how much of the database ImmichEye owns:
 
 | Mode | |
 |---|---|
 | `off` | Never touch CodeProject.AI. |
-| `managed` (default) | Add, update and remove only the entries ImmichEye created. It never overwrites or deletes anyone else's, and skips a number that's already taken. Your existing faces stay. |
-| `exclusive` | As `managed`, and delete every other entry, so CodeProject.AI knows exactly the Immich people. Use this once you've decided Immich is the only source of faces. |
+| `managed` (default) | Add, update and remove only the entries ImmichEye created. It never overwrites or deletes anyone else's, and skips a number that's already taken. |
+| `exclusive` | As `managed`, and delete every other entry, so CodeProject.AI knows exactly the Immich people. Use this once Immich is your only source of faces. |
 
-ImmichEye tracks what it registered in `data/cpai_sync.json`. Before switching an existing
+ImmichEye records what it registered in `data/cpai_sync.json`. Before switching an existing
 install to `exclusive`, back up CodeProject.AI's `faceembedding.db` (in its data directory,
 `/etc/codeproject/ai` in the Docker image).
 
+A sync warning like `register cal_smith4: No face detected` means CodeProject.AI's detector
+found no face in any image of that cluster (usually side-on faces). That person's other entries
+are unaffected.
+
 ## When ImmichEye or Immich ML is down
 
-By default (`IMMICHEYE_CPAI_FALLBACK=0`) face recognition reports **no face** until it's back.
-Person and vehicle detection carry on as normal. Only face names stop.
+By default (`IMMICHEYE_CPAI_FALLBACK=0`), face recognition reports **no face** until it's back.
+Person, vehicle and every other detection carry on normally. Only names stop.
 
-Why not fall back to CodeProject.AI? Because a wrong name is worse than no name. "Unknown"
-still gets you the person alert, and you look at the clip. A wrong name ("bea" for a stranger)
-can make you ignore an alert you needed. It can also wrongly satisfy notification rules that
-quieten known people, and it stays in alert histories and face filters for good. Even with the
-same people synced, CodeProject.AI names about half of faces wrongly
-([Accuracy](#accuracy)), so a fallback name tells you nothing you can rely on.
+ImmichEye doesn't fall back to CodeProject.AI by default because a wrong name is worse than no
+name:
 
-`IMMICHEYE_CPAI_FALLBACK=1` lets CodeProject.AI answer during outages, and also applies when the
-router can't reach ImmichEye. It uses Blue Iris's face minimum confidence, so raise that if you
-enable it.
+- An "unknown" person still gets you the person alert, and you look at the clip.
+- A wrong name (`bea` for a stranger) can make you ignore an alert you needed. It can satisfy a
+  rule that quietens known people, and it stays in alert histories and face filters for good.
+- Even with the same people synced, CodeProject.AI names about half of faces wrongly (see
+  [Accuracy](#accuracy)). A fallback name is no better than a guess.
 
-Keep outages short instead: make sure the Immich ML container restarts on boot, as ImmichEye's
-does (`restart: unless-stopped`).
+`IMMICHEYE_CPAI_FALLBACK=1` lets CodeProject.AI answer face recognition during outages, both
+from ImmichEye and from the router when ImmichEye itself is unreachable. Register and delete
+never fall back. If you enable it, raise Blue Iris's face minimum confidence.
 
-## Blue Iris's minimum confidence
+The better fix is short outages: make sure the Immich machine-learning container starts on boot
+(ImmichEye's containers use `restart: unless-stopped`).
 
-ImmichEye decides who someone is with its own `IMMICHEYE_MATCH_THRESHOLD` and margin, not with
-the minimum confidence Blue Iris sends. CodeProject.AI applies that value to `(cosine+1)/2`, a
-scale on which Blue Iris's usual 0.40 accepts almost any face. Confidences ImmichEye returns are
-on that same scale. The default threshold of 0.40 cosine is 0.70 there, so names show in Blue
-Iris as about 70–90%. If you raise Blue Iris's face minimum confidence above 0.70, it may drop
-ImmichEye's weaker matches.
+## Accuracy
+
+### Held-out Immich faces
+
+Measured with `scripts/evaluate.py` on one library: 52 people, 2,178 reference faces. Test faces
+are each person's Immich faces that the gallery didn't use, at the default settings. Small faces
+are the closest stand-in for CCTV.
+
+| Test faces | ImmichEye correct / **wrong** / unknown | CodeProject.AI (same people synced) correct / **wrong** / unknown |
+|---|---|---|
+| Small, 30–60 px | 86% / **2.5%** / 11% | 41% / **53%** / 7% |
+| Larger, 80–400 px | 97% / **1.2%** / 2% | 52% / **45%** / 3% |
+
+CodeProject.AI's figures are at Blue Iris's usual minimum confidence (0.40). Raising it removes
+right and wrong names together: at 0.80 it got 20% right and 8% wrong on larger faces. Part of
+the "wrong" share is the library's own duplicates, the same person under two spellings.
+
+### Real CCTV
+
+On walks past two cameras running main stream, one person was named in about half to 70% of
+the frames where a face was detected (9 of 13 on the closer camera), with scores of 0.44–0.62.
+No frame was given the wrong name. Every
+"unknown" frame, checked with saved crops, was the top or back of a head, a motion-blurred face,
+or a face under 10 px from a sub-stream camera. Run `scripts/evaluate.py` and check
+`data/recognitions.jsonl` for your own figures; results depend on your photos and cameras.
 
 ## Tuning
 
-Every recognition request is logged to `data/recognitions.jsonl` with the frame size and each
-face's box and top three scores. Set `IMMICHEYE_SAVE_FACES=500` to also keep crops of the last
-500 faces in `data/faces`, named with the result, best match, score and face width, to see what
-your cameras actually capture.
+Two thresholds decide every result:
+
+| Setting | Default | Effect |
+|---|---|---|
+| `IMMICHEYE_DETECT_MIN_SCORE` | 0.70 | How sure the detector must be that something is a face. On real CCTV, clear faces detect at about 0.8 and the tops and backs of heads at 0.5–0.6. 0.70 is Immich's own default. |
+| `IMMICHEYE_MATCH_THRESHOLD` | 0.40 | How similar a face must be to a person to be named. A known person typically scores 0.45–0.65 on CCTV and strangers under 0.25. |
+| `IMMICHEYE_MATCH_MARGIN` | 0.05 | How far the best person must be ahead of the runner-up. |
+
+If people you know often come back `unknown` on clear, frontal faces, lower the threshold a
+little (e.g. 0.35). If you see wrong names, raise the threshold or the margin.
+
+**Tools:**
 
 ```sh
-# How a particular frame scores
+# Every request: frame size, faces, top three matches, result
+tail -f data/recognitions.jsonl
+
+# Keep crops of the last 500 faces Blue Iris sent, named with result, best match, score and width
+#   .env: IMMICHEYE_SAVE_FACES=500   ->   data/faces/20261024-153924-424_0_cal_smith_cal_smith-0.60_93px.jpg
+
+# Score any image
 curl -F image=@frame.jpg http://127.0.0.1:8000/immicheye/explain
 
-# Accuracy against your own library at a range of thresholds (run where .env is available)
-set -a; . ./.env; set +a; IMMICHEYE_DATA=./data python scripts/evaluate.py [--cpai] [--min-px 30 --max-px 60]
+# Accuracy on your own library at a range of thresholds; --cpai also scores CodeProject.AI
+docker compose exec immicheye python scripts/evaluate.py [--cpai] [--min-px 30 --max-px 60]
 ```
 
-Face detection needs a confidence of `IMMICHEYE_DETECT_MIN_SCORE` (default 0.70, Immich's own
-default). On real CCTV, clear faces detect at about 0.8 and the backs and tops of heads at
-0.5-0.6, so lowering it mostly adds "unknown" faces that aren't faces.
+## Settings reference
 
-Defaults: threshold 0.40 (cosine), margin 0.05. If people you know come back `unknown`, lower
-the threshold a little. If you see wrong names, raise it or the margin.
+All settings go in `.env` (see `.env.example`).
+
+| Setting | Default | |
+|---|---|---|
+| `IMMICH_URL` | | Immich server, e.g. `http://immich.lan:2283` |
+| `IMMICH_API_KEY` | | Key with `person.read`, `asset.read`, `face.read`, `asset.view` |
+| `IMMICH_ML_URL` | | Immich machine-learning server, e.g. `http://immich.lan:3003` |
+| `CPAI_URL` | | CodeProject.AI, used by ImmichEye for sync and fallback |
+| `CPAI_UPSTREAM` | | CodeProject.AI as `host:port`, used by the router |
+| `IMMICHEYE_PORT` | 32170 | Router port: point Blue Iris here |
+| `IMMICHEYE_ADMIN_BIND` / `_PORT` | 127.0.0.1 / 8000 | Where the [admin endpoints](#admin-endpoints) listen |
+| `IMMICHEYE_PEOPLE` | all named | Comma-separated Immich names to recognise |
+| `IMMICHEYE_LABELS` | `first` | `first` or `full`; see [Labels](#labels) |
+| `IMMICHEYE_NAME_MAP` | `{}` | JSON map of Immich name to label |
+| `IMMICHEYE_MODEL` | `buffalo_l` | Must match the facial recognition model in Immich's settings |
+| `IMMICHEYE_ASSETS_PER_PERSON` | 250 | Recent photos searched per person |
+| `IMMICHEYE_FACES_PER_PERSON` | 40 | Reference faces kept per person |
+| `IMMICHEYE_MIN_FACE_PX` | 60 | Smallest reference face (short side) |
+| `IMMICHEYE_REFRESH_MINUTES` | 360 | Gallery refresh and CodeProject.AI sync interval |
+| `IMMICHEYE_DETECT_MIN_SCORE` | 0.70 | See [Tuning](#tuning) |
+| `IMMICHEYE_MATCH_THRESHOLD` | 0.40 | See [Tuning](#tuning) |
+| `IMMICHEYE_MATCH_MARGIN` | 0.05 | See [Tuning](#tuning) |
+| `IMMICHEYE_TOP_K` | 3 | Reference faces averaged into a person's score |
+| `IMMICHEYE_CPAI_SYNC` | `managed` | `off`, `managed` or `exclusive`; see [CodeProject.AI's face database](#codeprojectais-face-database) |
+| `IMMICHEYE_CPAI_PROTOTYPES` | 4 | CodeProject.AI entries per person |
+| `IMMICHEYE_CPAI_FALLBACK` | 0 | 1 = let CodeProject.AI answer when ImmichEye can't |
+| `IMMICHEYE_LOG_RECOGNITIONS` | 1 | Write `data/recognitions.jsonl` (rotated at 20 MB) |
+| `IMMICHEYE_SAVE_FACES` | 0 | Keep crops of the last N faces in `data/faces` |
+
+### What Blue Iris's minimum confidence means here
+
+Blue Iris sends its minimum confidence with each face request. CodeProject.AI uses it as its match
+threshold on a `(cosine + 1) / 2` scale, where the usual 0.40 accepts almost any face. ImmichEye
+ignores it and decides with its own threshold and margin. Confidences it returns are on that
+same `(cosine + 1) / 2` scale, so they look familiar to Blue Iris: the default threshold of 0.40
+appears as 70%.
 
 ## Admin endpoints
 
-These listen on `IMMICHEYE_ADMIN_PORT` (default 8000), bound to `IMMICHEYE_ADMIN_BIND` (default 127.0.0.1). They're
-unauthenticated.
+These listen on `IMMICHEYE_ADMIN_BIND:IMMICHEYE_ADMIN_PORT` (default `127.0.0.1:8000`) and are
+unauthenticated. Keep them off untrusted networks.
 
 | | |
 |---|---|
-| `GET /immicheye/status` | Gallery size, faces per label, last refresh and sync errors, unavailable count |
+| `GET /immicheye/status` | Gallery size, faces per label, last refresh and sync errors, settings in use |
 | `POST /immicheye/refresh` | Rebuild the gallery and sync CodeProject.AI now |
-| `POST /immicheye/explain` | Score a posted image (`image` field) |
+| `POST /immicheye/explain` | Score a posted image (`image` field): every face with its five best matches |
+
+## Troubleshooting
+
+| Symptom | Check |
+|---|---|
+| No names at all | `GET /immicheye/status`: `faces` should be non-zero and `last_error` null. Then `tail -f data/recognitions.jsonl` while someone walks past. No lines means Blue Iris isn't sending face requests: check the AI port, that the camera has face recognition on, and that `person` is detected. |
+| Lines in the log, all `no face` | Look at `size`: under about 1280 px wide means the camera isn't using the main stream for AI. |
+| Faces found, all `unknown` | Turn on `IMMICHEYE_SAVE_FACES` and look at the crops. Tops of heads and blur are expected. Clear frontal faces scoring 0.3–0.4 for the right person suggest lowering the threshold slightly. |
+| Wrong names | The log shows the top three scores. A small margin between two people usually means mixed-up faces in Immich. Raise `IMMICHEYE_MATCH_MARGIN` or the threshold. |
+| `unavailable` count rising | ImmichEye can't reach Immich ML. Check that it's running and that `IMMICH_ML_URL` works from the ImmichEye host: `curl $IMMICH_ML_URL/ping` should return `pong`. |
+| Blue Iris's faces view shows the wrong people | It shows ImmichEye's list, i.e. your Immich people. That's expected. |
+| Port 8000 already in use | Set `IMMICHEYE_ADMIN_PORT` to a free port. |
+| Using Blue Iris 6's built-in AI | Not supported: ImmichEye works through the CodeProject.AI API. Switch the provider to CodeProject.AI. |
+
+## Updating
+
+```sh
+git pull
+docker compose up -d --build
+```
+
+`.env` and `data/` are kept. If you change `IMMICHEYE_MODEL` (or the model in Immich), every
+reference face is re-embedded at the next refresh.
 
 ## Development
 
@@ -187,9 +399,14 @@ python -m venv .venv && .venv/bin/pip install -e '.[test]'
 .venv/bin/pytest
 ```
 
+The code is small: `immicheye/server.py` (endpoints), `gallery.py` (reference faces and
+matching), `cpai_sync.py` (CodeProject.AI sync), `immich.py` and `ml.py` (API clients), and
+`nginx/default.conf.template` (the router).
+
 ## Privacy
 
-ImmichEye sends Immich previews and camera frames only to your own Immich ML and
-CodeProject.AI servers. It stores face crops, embeddings and a recognition log in `data/`.
-Recognising people on camera may be regulated where you live. Check before you point it
-at a public street.
+ImmichEye sends Immich previews and camera frames only to your own Immich ML and CodeProject.AI
+servers, and reads from Immich with a read-only key. It stores reference face crops and
+embeddings, a recognition log and, if enabled, crops of faces from your cameras in `data/`.
+Recognising people on camera may be regulated where you live. Check before pointing cameras at
+public spaces.

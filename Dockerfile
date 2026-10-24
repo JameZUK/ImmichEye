@@ -3,6 +3,7 @@ FROM python:3.13-slim
 WORKDIR /app
 COPY pyproject.toml README.md ./
 COPY immicheye ./immicheye
+COPY scripts ./scripts
 RUN pip install --no-cache-dir . && useradd --system --uid 1000 immicheye && mkdir /data && chown immicheye /data
 
 USER immicheye
