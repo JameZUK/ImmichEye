@@ -34,6 +34,7 @@ Blue Iris knows after the next refresh.
 - [Updating](#updating)
 - [Development](#development)
 - [Privacy](#privacy)
+- [Licence](#licence)
 
 ## How it works
 
@@ -410,3 +411,7 @@ servers, and reads from Immich with a read-only key. It stores reference face cr
 embeddings, a recognition log and, if enabled, crops of faces from your cameras in `data/`.
 Recognising people on camera may be regulated where you live. Check before pointing cameras at
 public spaces.
+
+## Licence
+
+MIT. See [LICENSE](LICENSE).

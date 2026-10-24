@@ -3,6 +3,8 @@ name = "immicheye"
 version = "0.1.0"
 description = "Immich-quality face recognition for Blue Iris, as a CodeProject.AI-compatible face module"
 readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE"]
 requires-python = ">=3.11"
 dependencies = [
     "fastapi>=0.115",
