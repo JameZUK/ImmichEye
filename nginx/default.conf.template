@@ -11,6 +11,7 @@ upstream cpai {
 server {
     listen 8080;
     client_max_body_size 32m;
+    client_body_buffer_size 8m;   # main-stream frames stay in memory, not temp files
 
     proxy_http_version 1.1;
     proxy_set_header Connection "";

@@ -5,6 +5,7 @@ here and everything else straight to CodeProject.AI. Response shapes copy CPAI's
 FaceProcessing module (intelligencelayer/face.py, 1.12.x), which is what Blue Iris parses.
 """
 import asyncio
+import io
 import json
 import logging
 import time
@@ -13,6 +14,7 @@ from contextlib import asynccontextmanager
 from email.utils import formatdate
 
 import httpx
+from PIL import Image
 from fastapi import FastAPI, Request, Response
 from fastapi.responses import JSONResponse
 
@@ -133,6 +135,12 @@ async def recognize(request: Request) -> Response:
     if upload is None or isinstance(upload, str):
         return cpai_envelope({"success": False, "error": "No image provided"}, "recognize", started)
     jpeg = await upload.read()
+    try:
+        size = list(Image.open(io.BytesIO(jpeg)).size)   # reads the header only
+    except Exception:
+        size = None
+    entry = {"ts": time.time(), "file": getattr(upload, "filename", None), "size": size,
+             "bytes": len(jpeg), "min_confidence": form.get("min_confidence")}
 
     t = time.perf_counter()
     try:
@@ -143,6 +151,7 @@ async def recognize(request: Request) -> Response:
     inference_ms = int((time.perf_counter() - t) * 1000)
 
     if not faces:
+        log_recognition({**entry, "ms": inference_ms, "faces": []})
         return cpai_envelope({"success": False, "error": "No face found in image", "inferenceMs": inference_ms},
                              "recognize", started)
 
@@ -165,8 +174,7 @@ async def recognize(request: Request) -> Response:
                        "top": [[m.label, round(m.score, 3)] for m in matches[:3]],
                        "result": predictions[-1]["userid"]})
 
-    log_recognition({"ts": time.time(), "file": getattr(upload, "filename", None),
-                     "min_confidence": form.get("min_confidence"), "faces": logged})
+    log_recognition({**entry, "ms": inference_ms, "faces": logged})
     return cpai_envelope({
         "message": "A face was recognised" if found_known else "No known faces",
         "count": len(predictions),
