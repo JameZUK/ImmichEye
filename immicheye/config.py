@@ -20,6 +20,7 @@ class Settings:
     # Gallery
     people: tuple[str, ...]          # Immich names to include; empty = every named person
     name_map: dict[str, str]         # Immich name -> Blue Iris label
+    label_style: str                 # "first" (cal) or "full" (cal_smith)
     assets_per_person: int           # most recent photos searched per person
     faces_per_person: int            # best faces kept from those
     min_face_px: int                 # smallest face (short side, in Immich's frame) worth using
@@ -40,6 +41,9 @@ def load() -> Settings:
     sync = _env("IMMICHEYE_CPAI_SYNC", "managed").lower()
     if sync not in ("off", "managed", "exclusive"):
         raise ValueError(f"IMMICHEYE_CPAI_SYNC must be off, managed or exclusive, not {sync!r}")
+    labels = _env("IMMICHEYE_LABELS", "first").lower()
+    if labels not in ("first", "full"):
+        raise ValueError(f"IMMICHEYE_LABELS must be first or full, not {labels!r}")
     people = tuple(p.strip() for p in _env("IMMICHEYE_PEOPLE", "").split(",") if p.strip())
     name_map = json.loads(_env("IMMICHEYE_NAME_MAP", "{}") or "{}")
     return Settings(
@@ -51,6 +55,7 @@ def load() -> Settings:
         data_dir=Path(_env("IMMICHEYE_DATA", "/data")),
         people=people,
         name_map=name_map,
+        label_style=labels,
         assets_per_person=int(_env("IMMICHEYE_ASSETS_PER_PERSON", "250")),
         faces_per_person=int(_env("IMMICHEYE_FACES_PER_PERSON", "40")),
         min_face_px=int(_env("IMMICHEYE_MIN_FACE_PX", "60")),

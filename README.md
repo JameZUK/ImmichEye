@@ -84,9 +84,13 @@ Immich is the only source of faces. People are managed there, never in Blue Iris
 - **Who is recognised.** By default, every named, non-hidden person. `IMMICHEYE_PEOPLE` limits
   recognition to a comma-separated list of names. Use it to recognise your household and regular
   visitors, not everyone in your photo library: fewer people means fewer false matches.
-- **Labels** are the lower-case first name (`cal`), or the full name where two different
-  people share a first name (`cal_smith`). Override them with `IMMICHEYE_NAME_MAP`, e.g.
-  `{"Evelyn Mary Jones": "eve"}`. Unmerged duplicates with the same name pool their faces. Merge
+- **Labels** are lower case with underscores between words, which is what Blue Iris and Caesa
+  handle reliably. With `IMMICHEYE_LABELS=first` (the default), a label is the first name
+  (`cal`), or the full name where two different people share a first name (`cal_smith`). With
+  `IMMICHEYE_LABELS=full`, it's always the full name: `cal_smith`, or `cal_smith_dad` for
+  "Cal Smith (Dad)". Override particular people with `IMMICHEYE_NAME_MAP`, e.g.
+  `{"Evelyn Mary Jones": "eve"}`. Changing labels renames the synced CodeProject.AI faces at the
+  next refresh. Unmerged duplicates with the same name pool their faces. Merge
   misspelt duplicates in Immich, or map them to one label.
 - **Blue Iris can't change faces.** ImmichEye answers Blue Iris's face register and delete
   calls itself, and they never reach CodeProject.AI. Registering is refused ("Faces are managed

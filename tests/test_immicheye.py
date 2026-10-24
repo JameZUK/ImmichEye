@@ -35,6 +35,8 @@ def jpeg():
 def test_labels():
     people = [Person("1", "Cal Smith"), Person("2", "Cal Brown"), Person("3", "Bea"),
               Person("4", "Dan2"), Person("5", "Eve Ellen"), Person("6", "Bea")]
+    full = labels_for(people + [Person("7", "Cal Smith (Dad)")], {}, "full")
+    assert full["3"] == "bea" and full["5"] == "eve_ellen" and full["7"] == "cal_smith_dad"
     labels = labels_for(people, {"Eve Ellen": "eve"})
     assert labels == {"1": "cal_smith", "2": "cal_brown", "3": "bea", "4": "dan", "5": "eve", "6": "bea"}
 

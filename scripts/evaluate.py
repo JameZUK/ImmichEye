@@ -32,7 +32,7 @@ async def main(a):
         people = await immich.people()
         if s.people:
             people = [p for p in people if p.name.lower() in {n.lower() for n in s.people}]
-        labels = labels_for(people, s.name_map)
+        labels = labels_for(people, s.name_map, s.label_style)
         sem = asyncio.Semaphore(8)
         cpai_sem = asyncio.Semaphore(2)   # a live server: don't crowd out Blue Iris
         rng = random.Random(1)

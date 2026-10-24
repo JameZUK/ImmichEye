@@ -24,8 +24,11 @@ log = logging.getLogger(__name__)
 CROP_MARGIN = 0.6   # context added around Immich's box (fraction of box size, each side)
 
 
-def labels_for(people: list[Person], name_map: dict[str, str]) -> dict[str, str]:
-    """Immich name -> Blue Iris label. First name, lower case; full name where first names clash.
+def labels_for(people: list[Person], name_map: dict[str, str], style: str = "first") -> dict[str, str]:
+    """Immich name -> Blue Iris label, lower case with underscores between words.
+
+    style "first": the first name, or the full name where first names clash.
+    style "full": always the full name ("Cal Smith (Dad)" -> cal_smith_dad).
 
     Labels never end in a digit: Blue Iris and Caesa treat trailing digits as a
     registration number ("cal1" is cal).
@@ -43,7 +46,7 @@ def labels_for(people: list[Person], name_map: dict[str, str]) -> dict[str, str]
             out[p.id] = name_map[p.name]
         else:
             first = slug(p.name.split()[0])
-            out[p.id] = first if len(firsts[first]) == 1 else slug(p.name)
+            out[p.id] = first if style == "first" and len(firsts[first]) == 1 else slug(p.name)
     return out
 
 
@@ -148,7 +151,7 @@ class GalleryBuilder:
         if self.s.people:
             wanted = {n.lower() for n in self.s.people}
             people = [p for p in people if p.name.lower() in wanted]
-        labels = labels_for(people, self.s.name_map)
+        labels = labels_for(people, self.s.name_map, self.s.label_style)
 
         # The same label can cover several Immich people (e.g. an unmerged duplicate);
         # they pool their faces.
