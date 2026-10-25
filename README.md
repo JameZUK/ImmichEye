@@ -119,7 +119,12 @@ it knows the same people, using its own weaker matching.
    git clone https://github.com/JameZUK/ImmichEye.git immicheye && cd immicheye
    cp .env.example .env      # fill in the URLs and the API key
    mkdir -p data
+   sudo chown 1000:1000 data # the container runs as uid 1000 and writes here
    ```
+   The container runs as user id 1000, not root, and keeps its cache and crops in `./data`. If
+   your own user id isn't 1000 (`id -u`), that `chown` is needed, or the gallery never builds and
+   `last_error` shows a `PermissionError`.
+
    At minimum set `IMMICH_URL`, `IMMICH_API_KEY`, `IMMICH_ML_URL`, `CPAI_URL` and
    `CPAI_UPSTREAM`. Every setting is described in [Settings reference](#settings-reference).
 3. **Start.**
@@ -561,6 +566,7 @@ unauthenticated. Keep them off untrusted networks.
 
 | Symptom | Check |
 |---|---|
+| `last_error` is a `PermissionError` on `/data` | The container runs as uid 1000: `sudo chown -R 1000:1000 data`, then `POST /immicheye/refresh` or restart. |
 | No names at all | `GET /immicheye/status`: `faces` should be non-zero and `last_error` null. Then `tail -f data/recognitions.jsonl` while someone walks past. No lines means Blue Iris isn't sending face requests: check the AI port, that the camera has face recognition on, and that `person` is detected. |
 | Lines in the log, all `no face` | Look at `size`: under about 1280 px wide means the camera isn't using the main stream for AI. |
 | Faces found, all `unknown` | Turn on `IMMICHEYE_SAVE_FACES` and look at the crops. Tops of heads and blur are expected. Clear frontal faces scoring 0.3–0.4 for the right person suggest lowering the threshold slightly. |
