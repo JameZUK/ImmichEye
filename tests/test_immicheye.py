@@ -19,7 +19,9 @@ import respx  # noqa: E402
 from fastapi.testclient import TestClient  # noqa: E402
 
 from immicheye import server  # noqa: E402
+from immicheye import blueiris  # noqa: E402
 from immicheye.alerts import AlertNames, alert_key  # noqa: E402
+from immicheye.blueiris import LateNames, merge_memo  # noqa: E402
 from immicheye.gallery import Gallery, GalleryBuilder, labels_for  # noqa: E402
 from immicheye.immich import Person  # noqa: E402
 from immicheye.ml import Face  # noqa: E402
@@ -430,3 +432,67 @@ def test_recognize_shares_names_within_an_alert(client, monkeypatch):
     # not shared with frames outside the alert, or with another alert
     assert post_as(client, "Front.20260101_120007Z.jpg").json()["success"] is False
     assert post_as(client, ALERT.replace("1234", "1235")).json()["success"] is False
+
+
+def test_merge_memo_puts_names_after_person_within_50_chars():
+    memo = "person:86%,unknown,car:83%,vehicle:73%"
+    out = merge_memo(memo, {"Cal Smith": 0.745, "Bea Jones": 0.734})
+    assert out == "person:86%,Cal Smith:74%,Bea Jones:73%,car:83%" and len(out) <= 50
+    assert merge_memo("person:90%,Cal Smith:80%", {"Cal Smith": 0.7}) == "person:90%,Cal Smith:80%"
+    assert merge_memo("", {"Bea": 0.75}) == "Bea:75%"
+    long = merge_memo("person:86%,car:83%", {"Cal Smithson-Jones": 0.75, "Beatrice Jones": 0.74})
+    assert long == "person:86%,Cal Smithson-Jones:75%"   # a name that doesn't fit is left out, not cut
+
+
+BI = "http://bi.test/json"
+
+
+def fake_blueiris(alerts):
+    """A Blue Iris JSON API holding alerts ({path, file, memo}); records memo updates."""
+    updates = []
+
+    def handle(request):
+        body = json.loads(request.content)
+        cmd = body["cmd"]
+        if cmd == "login":
+            return httpx.Response(200, json={"result": "success", "session": "s1"} if "response" in body
+                                  else {"result": "fail", "session": "s0"})
+        if cmd == "alertlist":
+            return httpx.Response(200, json={"result": "success",
+                                             "data": [a for a in alerts if a["camera"] == body["camera"]]})
+        if cmd == "update":
+            updates.append((body["path"], body["memo"]))
+            assert body["mask"] == 2 and body["flags"] == 2   # flag bit 2 kept as it was
+            for a in alerts:
+                if a["path"] == body["path"]:
+                    a["memo"] = body["memo"]
+        return httpx.Response(200, json={"result": "success"})
+
+    respx.post(BI).mock(side_effect=handle)
+    return updates
+
+
+@respx.mock
+def test_late_names_added_to_the_alert_memo(monkeypatch):
+    monkeypatch.setattr(blueiris, "SETTLE_S", 0)
+    monkeypatch.setattr(blueiris, "DEBOUNCE_S", 0)
+    monkeypatch.setattr(blueiris, "RETRIES", ())
+    alert_file = "Front.20260101_120000Z.1234.3-1.jpg"
+    updates = fake_blueiris([{"camera": "Front", "path": "@77.bvr", "file": alert_file, "memo": "person:86%,unknown",
+                                "flags": 0x14030002}])
+    s = dataclasses.replace(server.settings, blueiris_url="http://bi.test", blueiris_user="u", blueiris_password="p")
+
+    async def run():
+        async with httpx.AsyncClient() as c:
+            late = LateNames(s, c)
+            late.observe("Front", alert_key(alert_file), alert_file, [pred("unknown")])
+            late.observe("Drive", None, "Drive.20260101_120003Z.jpg", [pred("bea")])     # another camera
+            late.observe("Front", None, "Front.20260101_120005Z.jpg", [pred("cal", 0.745)])
+            await late.latest["front"].task
+            assert updates == [("@77.bvr", "person:86%,cal:74%")]
+            late.observe("Front", None, "Front.20260101_120006Z.jpg", [pred("cal", 0.8)])   # nothing new
+            assert late.latest["front"].task.done() and late.status()["updated"] == 1
+            late.latest["front"].first -= 3600                                             # past the window
+            late.observe("Front", None, "Front.20260101_130000Z.jpg", [pred("bea")])
+            assert "bea" not in late.latest["front"].names
+    asyncio.run(run())

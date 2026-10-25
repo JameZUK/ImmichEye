@@ -20,8 +20,9 @@ from fastapi.responses import JSONResponse
 
 from . import config
 from .alerts import AlertNames, alert_key
+from .blueiris import LateNames
 from .cpai_sync import CpaiSync
-from .events import EventSink, context_box
+from .events import EventSink, camera_of, context_box
 from .gallery import Gallery, GalleryBuilder
 from .immich import Immich
 from .ml import ImmichML
@@ -72,6 +73,7 @@ async def lifespan(app: FastAPI):
     app.state.cpai = CpaiSync(settings, client)
     app.state.events = EventSink(settings, client)
     app.state.alerts = AlertNames(settings.alert_hold_ms / 1000)
+    app.state.late = LateNames(settings, client)
     tasks = [asyncio.create_task(refresh_loop(app.state.builder, app.state.cpai)),
              asyncio.create_task(app.state.events.run())]
     yield
@@ -201,13 +203,14 @@ async def recognize(request: Request) -> Response:
         events.append({**logged[-1], "score": round(best.score, 3), "embedding": f.embedding})
 
     entry.update(ms=inference_ms, faces=logged)
-    alert = alert_key(entry["file"]) if settings.alert_share else None
-    if alert:
+    alert = alert_key(entry["file"])
+    if alert and settings.alert_share:
         predictions, shared, entry["held_ms"] = await request.app.state.alerts.share(alert, predictions)
         if shared:
             entry["shared"] = shared
         if entry["held_ms"] and await request.is_disconnected():
             entry["gave_up"] = True   # Blue Iris stopped waiting for this reply
+    request.app.state.late.observe(camera_of(entry["file"]), alert, entry["file"], predictions)
     request.app.state.events.submit(jpeg, entry, events)
     save_face_crops(jpeg, entry)
     log_recognition(entry)
@@ -268,6 +271,7 @@ async def status(request: Request) -> dict:
         "match_threshold": settings.match_threshold,
         "match_margin": settings.match_margin,
         "events": request.app.state.events.status(),
+        "late_names": request.app.state.late.status(),
     }
 
 

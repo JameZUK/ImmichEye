@@ -305,6 +305,28 @@ though other images in it named someone.
 It can't help when nobody shows a usable face while the alert is being analysed, for
 example when people only face the camera after it has gone out.
 
+### Late names
+
+Often nobody faces the camera until after Blue Iris has sent the alert. Blue Iris keeps
+sending frames while the camera is triggered, and ImmichEye may name someone in them, but
+Blue Iris never changes an alert's memo by itself.
+
+With `IMMICHEYE_BLUEIRIS_URL`, `_USER` and `_PASSWORD` set, ImmichEye remembers each camera's
+latest alert. When a name turns up within `IMMICHEYE_LATE_NAMES_S` (default 60) of it, in the
+alert's images or the camera's later frames, and the memo lacks it, ImmichEye adds it through
+Blue Iris's JSON API. `person:86%,unknown,car:83%` becomes `person:86%,Cal Smith:74%,car:83%`.
+
+- It needs a Blue Iris **admin** user: Blue Iris only lets admins change a memo. Create one
+  for ImmichEye and keep `.env` private.
+- Names go after the first label and replace `unknown`. Blue Iris keeps only 50 characters of
+  a memo, so other labels are dropped from the end to make room.
+- The alert in Blue Iris, its search and apps that read the memo get the name. A push
+  notification already sent doesn't change.
+- Cancelled alerts aren't touched. `GET /immicheye/status` shows `late_names` (`updated`,
+  `failed`, `last_error`).
+- The frames after an alert come from the camera's AI settings. In testing they stopped when
+  static object analysis was turned off.
+
 ## Face events
 
 ImmichEye can hand every face it detects to another service, such as a visitor log that counts
@@ -490,6 +512,9 @@ All settings go in `.env` (see `.env.example`).
 | `IMMICHEYE_SAVE_FACES` | 0 | Keep crops of the last N faces in `data/faces` |
 | `IMMICHEYE_ALERT_SHARE` | 0 | 1 = every reply in an alert includes names found in its other images (see [Names in alerts](#names-in-alerts)) |
 | `IMMICHEYE_ALERT_HOLD_MS` | 3000 | A reply with no name waits for one until this long after the alert's first image |
+| `IMMICHEYE_BLUEIRIS_URL` | empty (off) | Blue Iris web server, e.g. `http://blueiris.example.lan:81`, for [late names](#late-names) |
+| `IMMICHEYE_BLUEIRIS_USER` / `_PASSWORD` | empty | A Blue Iris admin user (changing a memo needs admin) |
+| `IMMICHEYE_LATE_NAMES_S` | 60 | Names this long after an alert's first image still get added to its memo |
 | `IMMICHEYE_EVENTS_URL` | empty (off) | POST every detected face here (see [Face events](#face-events)) |
 | `IMMICHEYE_EVENTS_TOKEN` | empty | Sent as `Authorization: Bearer <token>` |
 | `IMMICHEYE_EVENTS_CAMERAS` | empty (all) | Comma-separated camera short names to send, e.g. `Front,Back` |
@@ -551,10 +576,11 @@ matching), `cpai_sync.py` (CodeProject.AI sync), `immich.py` and `ml.py` (API cl
 ## Privacy
 
 ImmichEye sends Immich previews and camera frames only to your own Immich ML and CodeProject.AI
-servers, and face events (embeddings and face crops) only to `IMMICHEYE_EVENTS_URL` if set. It
-reads from Immich with a read-only key. It stores reference face crops and embeddings, a recognition log and, if enabled, crops of faces from your cameras in `data/`.
-Recognising people on camera may be regulated where you live. Check before pointing cameras at
-public spaces.
+servers, names to your Blue Iris server's alert memos if `IMMICHEYE_BLUEIRIS_URL` is set, and
+face events (embeddings and face crops) only to `IMMICHEYE_EVENTS_URL` if set. It reads from
+Immich with a read-only key. It stores reference face crops and embeddings, a recognition log
+and, if enabled, crops of faces from your cameras in `data/`. Recognising people on camera may
+be regulated where you live. Check before pointing cameras at public spaces.
 
 ## Licence
 
