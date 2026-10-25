@@ -193,6 +193,10 @@ wrongly assigned faces. Changes reach Blue Iris at the next refresh, or straight
   `IMMICHEYE_PEOPLE` limits recognition to a comma-separated list of Immich names. Your household
   and regular visitors are a better choice than everyone in a photo library: fewer people means
   fewer chances of a wrong match.
+- **Removing many people at once.** A refresh that would leave fewer than half the faces
+  (narrowing `IMMICHEYE_PEOPLE`, for example) is held back once, in case Immich answered
+  wrongly; the next refresh applies it. One that would leave none is never applied. Either
+  shows as `last_error` in `GET /immicheye/status`.
 - **Duplicates.** Several Immich people with the same name (unmerged clusters) pool their faces
   under one label. Misspelt duplicates ("Smith" and "Smiht") stay separate labels: merge them in
   Immich, or map both to one label with `IMMICHEYE_NAME_MAP`.
@@ -223,8 +227,13 @@ Changing either setting re-registers everyone in CodeProject.AI under the new sp
 next refresh.
 
 With `first`, a label is the first name unless two different people share it. Override anyone
-with `IMMICHEYE_NAME_MAP`, e.g. `{"Bea Jones (Mum)": "mum"}`. Avoid labels that are also object
-names (`person`, `car`, `dog`…). Blue Iris would confuse them.
+with `IMMICHEYE_NAME_MAP`, e.g. `{"Bea Jones (Mum)": "mum"}`; trailing digits are removed from
+those too. Avoid labels that are also object names (`person`, `car`, `dog`…). Blue Iris would
+confuse them.
+
+Accents are dropped (`Zoë` becomes `zoe`). Names in other scripts keep their letters
+(`Иван Петров` becomes `иван_петров`); they haven't been tried with Blue Iris. A name with no
+letters or digits at all becomes `unnamed`, with a warning in the log.
 
 ### Blue Iris can't change faces
 
@@ -322,8 +331,9 @@ Blue Iris's JSON API. `person:86%,unknown,car:83%` becomes
 - Names go after the first label and any names already there, highest score first, with a
   percentage like Blue Iris's own labels (apps such as Caesa skip labels without one).
 - Blue Iris keeps only the first 49 characters of a memo, its own included. To make room,
-  other labels are left out first, then `unknown`, then the lowest-scoring names: two full
-  names always fit with `person`.
+  other labels are left out first, then `unknown`, then the lowest-scoring names. With
+  `person` there's room for two names of up to 14 characters each (`Cal Smith` and
+  `Bea Jones` fit with room to spare).
 - Several people are handled: each new name updates the memo again, also while an update
   is under way.
 - The alert in Blue Iris, its search and apps that read the memo get the name. A push
@@ -578,7 +588,9 @@ python -m venv .venv && .venv/bin/pip install -e '.[test]'
 ```
 
 The code is small: `immicheye/server.py` (endpoints), `gallery.py` (reference faces and
-matching), `cpai_sync.py` (CodeProject.AI sync), `immich.py` and `ml.py` (API clients), and
+matching), `tiles.py` (tiled detection), `alerts.py` (names shared within an alert),
+`blueiris.py` (late names), `events.py` (face events), `cpai_sync.py` (CodeProject.AI sync),
+`immich.py` and `ml.py` (API clients), `config.py` (settings), and
 `nginx/default.conf.template` (the router).
 
 ## Privacy

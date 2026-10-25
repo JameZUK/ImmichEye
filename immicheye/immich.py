@@ -46,7 +46,8 @@ class Immich:
         out, page = [], 1
         while True:
             body = (await self._get("/people", withHidden="false", page=page, size=500)).json()
-            out += [Person(p["id"], p["name"]) for p in body["people"] if p.get("name") and not p.get("isHidden")]
+            out += [Person(p["id"], p["name"].strip()) for p in body["people"]
+                    if (p.get("name") or "").strip() and not p.get("isHidden")]
             if not body.get("hasNextPage"):
                 return out
             page += 1

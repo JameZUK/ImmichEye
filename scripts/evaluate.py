@@ -38,8 +38,8 @@ async def main(a):
         if s.people:
             people = [p for p in people if p.name.lower() in {n.lower() for n in s.people}]
         labels = labels_for(people, s.name_map, s.label_style, s.label_case, s.label_sep)
-        for c in builder.cache.values():   # the cache may predate a label setting change
-            c["label"] = labels.get(c["person_id"])
+        for entry in builder.cache.values():   # the cache may predate a label setting change
+            entry["label"] = labels.get(entry["person_id"])
         g = builder.from_cache()
         sem = asyncio.Semaphore(8)
         cpai_sem = asyncio.Semaphore(2)   # a live server: don't crowd out Blue Iris

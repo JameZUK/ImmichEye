@@ -8,6 +8,7 @@ import asyncio
 import io
 import json
 import logging
+import re
 import time
 import uuid
 from contextlib import asynccontextmanager
@@ -143,7 +144,9 @@ def save_face_crops(jpeg: bytes, entry: dict) -> None:
             x1, y1, x2, y2 = f["box"]
             crop = img.crop(context_box(f["box"], img.width, img.height))
             score = f["top"][0][1] if f["top"] else 0
-            name = f"{stamp}_{i}_{f['result']}_{f['top'][0][0] if f['top'] else 'none'}-{score:.2f}_{x2 - x1}px.jpg"
+            labels = [f["result"], f["top"][0][0] if f["top"] else "none"]
+            result, best = (re.sub(r'[\\/:*?"<>|]', "_", label) for label in labels)   # labels can come from NAME_MAP
+            name = f"{stamp}_{i}_{result}_{best}-{score:.2f}_{x2 - x1}px.jpg"
             crop.save(out / name, "JPEG", quality=90)
             f["crop"] = name
         for old in sorted(out.glob("*.jpg"))[: -settings.save_faces]:
@@ -212,7 +215,7 @@ async def recognize(request: Request) -> Response:
             entry["gave_up"] = True   # Blue Iris stopped waiting for this reply
     request.app.state.late.observe(camera_of(entry["file"]), alert, entry["file"], predictions)
     request.app.state.events.submit(jpeg, entry, events)
-    save_face_crops(jpeg, entry)
+    await asyncio.to_thread(save_face_crops, jpeg, entry)   # decodes the whole frame
     log_recognition(entry)
     if not predictions:
         return cpai_envelope({"success": False, "error": "No face found in image", "inferenceMs": inference_ms},

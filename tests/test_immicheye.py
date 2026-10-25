@@ -18,13 +18,14 @@ os.environ.update(IMMICH_URL="http://127.0.0.1:9", IMMICH_ML_URL="http://127.0.0
 import respx  # noqa: E402
 from fastapi.testclient import TestClient  # noqa: E402
 
-from immicheye import server  # noqa: E402
+from immicheye import config, server  # noqa: E402
 from immicheye import blueiris  # noqa: E402
 from immicheye.alerts import AlertNames, alert_key  # noqa: E402
 from immicheye.blueiris import LateNames, merge_memo  # noqa: E402
 from immicheye.gallery import Gallery, GalleryBuilder, labels_for  # noqa: E402
-from immicheye.immich import Person  # noqa: E402
+from immicheye.immich import FaceRef, Immich, Person  # noqa: E402
 from immicheye.ml import Face  # noqa: E402
+from immicheye.tiles import tile_boxes  # noqa: E402
 
 
 def unit(*v):
@@ -613,3 +614,130 @@ def test_late_names_seen_during_a_failed_update_are_retried(monkeypatch):
             await asyncio.wait_for(late.latest["front"].task, 2)
             assert late.status()["failed"] == 2
     asyncio.run(asyncio.wait_for(run(), 5))
+
+
+@respx.mock
+def test_late_names_retry_when_seen_again_after_a_failure(monkeypatch):
+    monkeypatch.setattr(blueiris, "SETTLE_S", 0)
+    monkeypatch.setattr(blueiris, "DEBOUNCE_S", 0)
+    monkeypatch.setattr(blueiris, "RETRIES", ())
+    monkeypatch.setattr(blueiris, "RETRY_AFTER_S", 0.2)
+    alert_file = "Front.20260101_120000Z.1234.3-1.jpg"
+    updates = fake_blueiris([{"camera": "Front", "path": "@77.bvr", "file": alert_file, "memo": "person:86%",
+                              "flags": 0x14030002}])
+    s = dataclasses.replace(server.settings, blueiris_url="http://bi.test", blueiris_user="u", blueiris_password="p")
+
+    async def run():
+        async with httpx.AsyncClient() as c:
+            late = LateNames(s, c)
+            set_memo, down = late.bi.set_memo, [True]
+
+            async def flaky(*args):
+                if down[0]:
+                    raise httpx.ConnectError("blue iris restarting")
+                await set_memo(*args)
+            late.bi.set_memo = flaky
+            seen = lambda: late.observe("Front", None, "Front.20260101_120005Z.jpg", [pred("cal", 0.8)])
+            late.observe("Front", alert_key(alert_file), alert_file, [pred("cal", 0.8)])
+            await late.latest["front"].task
+            assert updates == [] and late.status()["failed"] == 1
+            down[0] = False
+            seen()                                   # seen again too soon: no retry yet
+            assert late.latest["front"].task.done() and updates == []
+            await asyncio.sleep(0.25)
+            seen()                                   # after the pause: retried
+            await late.latest["front"].task
+            assert [m for _, m in updates] == ["person:86%,cal:80%"]
+    asyncio.run(asyncio.wait_for(run(), 5))
+
+
+def test_labels_keep_other_scripts_fold_accents_and_never_say_person():
+    people = [Person("1", "Иван Петров"), Person("2", "王伟"), Person("3", "Zoë Ng"), Person("4", "José"),
+              Person("5", "123"), Person("6", "Cal Smith")]
+    labels = labels_for(people, {"Cal Smith": "cam2"}, "full", "title", " ")
+    assert labels == {"1": "Иван Петров", "2": "王伟", "3": "Zoe Ng", "4": "Jose", "5": "unnamed", "6": "cam"}
+    assert labels_for([Person("1", "Zoë Ng")], {})["1"] == "zoe"
+
+
+def test_merge_memo_drops_only_a_cut_last_label():
+    whole = "person:94%,Bea Jones:80%,Cal Smithson:71%,dog:79%"   # exactly 49, last label complete
+    assert len(whole) == 49
+    assert merge_memo(whole, {"Dan": 0.7}) == "person:94%,Bea Jones:80%,Cal Smithson:71%,Dan:70%"
+    cut = "person:94%,Bea Jones:80%,Cal Smith:71%,unknown,xy"   # 49: Blue Iris cut "xy..."
+    assert len(cut) == 49 and merge_memo(cut, {"Dan": 0.7}) == \
+        "person:94%,Bea Jones:80%,Cal Smith:71%,Dan:70%"   # unknown makes way for Dan
+
+
+def test_tiles_capped_for_oversized_frames():
+    assert len(tile_boxes(3840, 2160, 1280)) == 8
+    assert tile_boxes(10000, 10000, 1280) == []
+
+
+def test_on_off_settings_are_strict(monkeypatch):
+    monkeypatch.setenv("IMMICHEYE_ALERT_SHARE", "off")
+    assert config.load().alert_share is False
+    monkeypatch.setenv("IMMICHEYE_ALERT_SHARE", "maybe")
+    with pytest.raises(ValueError):
+        config.load()
+    monkeypatch.setenv("IMMICHEYE_ALERT_SHARE", "0")
+    monkeypatch.setenv("IMMICHEYE_CPAI_FALLBACK", "true")   # the router knows only 0 and 1
+    with pytest.raises(ValueError):
+        config.load()
+
+
+@respx.mock
+def test_immich_people_skips_blank_names():
+    respx.get("http://immich.test/api/people").respond(json={"people": [
+        {"id": "1", "name": "Cal"}, {"id": "2", "name": "  "}, {"id": "3", "name": ""},
+        {"id": "4", "name": "Bea", "isHidden": True}], "hasNextPage": False})
+
+    async def run():
+        async with httpx.AsyncClient() as c:
+            return await Immich("http://immich.test", "k", c).people()
+    assert asyncio.run(run()) == [Person("1", "Cal")]
+
+
+class FakeImmich:
+    """Immich with a list of people, each with one photo holding one 120 px face."""
+
+    def __init__(self, names):
+        self.names = names
+
+    async def people(self):
+        return [Person(f"p{i}", n) for i, n in enumerate(self.names)]
+
+    async def recent_assets(self, person_id, limit):
+        return [f"a-{person_id}"]
+
+    async def faces(self, asset_id):
+        pid = asset_id[2:]
+        return [FaceRef(f"f-{pid}", asset_id, pid, 100, 100, 220, 220, 640, 480)]
+
+    async def preview(self, asset_id):
+        buf = io.BytesIO()
+        Image.new("RGB", (640, 480), "gray").save(buf, "JPEG")
+        return buf.getvalue()
+
+
+def build_gallery(tmp_path, immich):
+    s = dataclasses.replace(server.settings, data_dir=tmp_path, lowres_px=(), people=())
+    return GalleryBuilder(s, immich, FakeML([Face((0, 0, 50, 50), 0.9, unit(1, 0))]))
+
+
+def test_gallery_build_keeps_previous_gallery_when_immich_returns_little(tmp_path):
+    immich = FakeImmich(["Cal", "Bea", "Dan", "Eve"])
+    b = build_gallery(tmp_path, immich)
+    g = asyncio.run(b.build())
+    assert len(g) == 4 and len(list((tmp_path / "crops").glob("*.jpg"))) == 4
+
+    immich.names = []                                    # Immich answers with nobody
+    with pytest.raises(RuntimeError, match="no usable faces"):
+        asyncio.run(b.build())
+    assert len(list((tmp_path / "crops").glob("*.jpg"))) == 4
+    assert len(build_gallery(tmp_path, immich).from_cache()) == 4   # the saved cache is untouched
+
+    immich.names = ["Cal"]                               # a sharp shrink: held once, then accepted
+    with pytest.raises(RuntimeError, match="shrink"):
+        asyncio.run(b.build())
+    assert len(asyncio.run(b.build())) == 1
+    assert [p.stem for p in (tmp_path / "crops").glob("*.jpg")] == ["f-p0"]

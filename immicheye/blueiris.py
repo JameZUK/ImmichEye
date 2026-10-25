@@ -35,6 +35,7 @@ DEBOUNCE_S = 2.0  # gather names arriving together into one update
 RETRIES = (3, 6, 12, 24)   # seconds to wait for Blue Iris to list, then confirm or cancel, the alert
 KEEP_FLAGS = 2            # FLAGGED: a memo-only update clears it
 CONFIRMED, CANCELLED, OCCUPIED = 1 << 28, 1 << 23, 1 << 29
+RETRY_AFTER_S = 10.0   # after a failed or undecided update, names seen again retry no sooner than this
 # Labels Blue Iris's object models give (COCO, plus its own); anything else in a memo is a face.
 OBJECTS = {
     "person", "bicycle", "car", "motorcycle", "motorbike", "airplane", "aeroplane", "bus", "train", "truck",
@@ -63,8 +64,9 @@ def merge_memo(memo: str, names: dict[str, float]) -> str:
     there, highest score first. Within MEMO_MAX, other labels go first, then "unknown", then
     the lowest-scoring names."""
     items = [i.strip() for i in (memo or "").split(",") if i.strip()]
-    if len(memo or "") >= MEMO_MAX and items:
-        items.pop()   # Blue Iris cut the memo: its last label is probably partial
+    if len(memo or "") >= MEMO_MAX and items and not re.search(r":\d+%$", items[-1]) \
+            and items[-1].lower() != "unknown":
+        items.pop()   # Blue Iris cut the memo inside its last label
     have = {i.rsplit(":", 1)[0].strip().lower() for i in items}
     new = [f"{label}:{round(conf * 100)}%" for label, conf in sorted(names.items(), key=lambda n: -n[1])
            if label.lower() not in have]
@@ -131,6 +133,8 @@ class _Alert:
     names: dict[str, float] = field(default_factory=dict)  # every confident name seen
     written: set[str] = field(default_factory=set)        # names already in the memo
     task: asyncio.Task | None = None
+    retry_at: float = 0.0     # monotonic time before which a failed update isn't retried
+    closed: bool = False      # cancelled or occupied: nothing to name
 
 
 class LateNames:
@@ -162,7 +166,10 @@ class LateNames:
             if p["userid"] != "unknown" and p["confidence"] > a.names.get(p["userid"], 0):
                 fresh |= p["userid"] not in a.names
                 a.names[p["userid"]] = p["confidence"]
-        if fresh and (a.task is None or a.task.done()):
+        # A new name starts an update; names already seen but not yet written (the last
+        # update failed, or Blue Iris hadn't decided) retry when seen again, after a pause.
+        due = bool(set(a.names) - a.written) and now >= a.retry_at
+        if not a.closed and (fresh or due) and (a.task is None or a.task.done()):
             a.task = asyncio.create_task(self._flush(a))
             self.tasks.add(a.task)
             a.task.add_done_callback(self.tasks.discard)
@@ -176,8 +183,10 @@ class LateNames:
         while (pending := {n for n in a.names if n not in a.written}) - tried:
             tried = pending
             try:
-                await self._write(a)
+                if not await self._write(a):
+                    a.retry_at = time.monotonic() + RETRY_AFTER_S
             except Exception as e:
+                a.retry_at = time.monotonic() + RETRY_AFTER_S
                 self.failed += 1
                 self.last_error = f"{type(e).__name__}: {e}"
                 log.warning("could not add late names to %s: %s", a.file, self.last_error)
@@ -196,10 +205,13 @@ class LateNames:
                 await asyncio.sleep(wait)
                 found = await self.bi.find_alert(s, a.camera, a.file)
             flags = int(found.get("flags", 0)) if found else 0
-            if not flags & CONFIRMED or flags & (CANCELLED | OCCUPIED):
-                if found is not None and not flags & (CANCELLED | OCCUPIED):
-                    log.info("%s alert %s not confirmed after %ds; names not added", a.camera, a.file, sum(RETRIES))
-                return False   # cancelled, still undecided, or never listed: nothing to name
+            if flags & (CANCELLED | OCCUPIED):
+                a.closed = True
+                return False   # cancelled: nothing to name, now or later
+            if not flags & CONFIRMED:
+                log.info("%s alert %s not confirmed after %ds; trying again if the names are seen again",
+                         a.camera, a.file, sum(RETRIES))
+                return False   # still undecided, or not listed yet
             memo = found.get("memo") or ""
             new = merge_memo(memo, names)   # all of them: names already in the memo are skipped
             if new != memo:

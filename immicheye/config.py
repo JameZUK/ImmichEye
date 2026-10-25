@@ -9,6 +9,15 @@ def _env(name: str, default: str) -> str:
     return os.environ.get(name, default).strip()
 
 
+def _flag(name: str, default: str) -> bool:
+    v = _env(name, default).lower()
+    if v in ("1", "true", "yes", "on"):
+        return True
+    if v in ("0", "false", "no", "off", ""):
+        return False
+    raise ValueError(f"{name} must be 1 or 0, not {v!r}")
+
+
 @dataclass(frozen=True)
 class Settings:
     immich_url: str
@@ -64,6 +73,9 @@ def load() -> Settings:
     sep = {"_": "_", "underscore": "_", "space": " "}.get(_env("IMMICHEYE_LABEL_SEPARATOR", "_").lower())
     if sep is None:
         raise ValueError("IMMICHEYE_LABEL_SEPARATOR must be underscore or space")
+    fallback = _env("IMMICHEYE_CPAI_FALLBACK", "0")
+    if fallback not in ("0", "1"):   # the nginx router reads it too, and knows only 0 and 1
+        raise ValueError(f"IMMICHEYE_CPAI_FALLBACK must be 0 or 1, not {fallback!r}")
     people = tuple(p.strip() for p in _env("IMMICHEYE_PEOPLE", "").split(",") if p.strip())
     name_map = json.loads(_env("IMMICHEYE_NAME_MAP", "{}") or "{}")
     return Settings(
@@ -84,8 +96,8 @@ def load() -> Settings:
         match_threshold=float(_env("IMMICHEYE_MATCH_THRESHOLD", "0.40")),
         match_margin=float(_env("IMMICHEYE_MATCH_MARGIN", "0.05")),
         top_k=int(_env("IMMICHEYE_TOP_K", "3")),
-        log_recognitions=_env("IMMICHEYE_LOG_RECOGNITIONS", "1") not in ("0", "false", "no"),
-        cpai_fallback=_env("IMMICHEYE_CPAI_FALLBACK", "0") not in ("0", "false", "no"),
+        log_recognitions=_flag("IMMICHEYE_LOG_RECOGNITIONS", "1"),
+        cpai_fallback=fallback == "1",
         cpai_sync=sync,
         cpai_prototypes=int(_env("IMMICHEYE_CPAI_PROTOTYPES", "4")),
         save_faces=int(_env("IMMICHEYE_SAVE_FACES", "0")),
@@ -101,6 +113,6 @@ def load() -> Settings:
         blueiris_user=_env("IMMICHEYE_BLUEIRIS_USER", ""),
         blueiris_password=os.environ.get("IMMICHEYE_BLUEIRIS_PASSWORD", ""),
         late_names_s=int(_env("IMMICHEYE_LATE_NAMES_S", "60")),
-        alert_share=_env("IMMICHEYE_ALERT_SHARE", "0") not in ("0", "false", "no"),
+        alert_share=_flag("IMMICHEYE_ALERT_SHARE", "0"),
         alert_hold_ms=int(_env("IMMICHEYE_ALERT_HOLD_MS", "3000")),
     )

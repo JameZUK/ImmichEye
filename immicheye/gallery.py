@@ -13,6 +13,7 @@ import json
 import logging
 import re
 import time
+import unicodedata
 from dataclasses import dataclass, field
 
 import numpy as np
@@ -25,6 +26,7 @@ from .ml import Face, ImmichML
 log = logging.getLogger(__name__)
 
 CROP_MARGIN = 0.6   # context added around Immich's box (fraction of box size, each side)
+SHRINK = 0.5        # a gallery shrinking below this fraction must be seen twice before it's used
 
 
 def shrink(crop: Image.Image, face_px: int) -> bytes | None:
@@ -52,26 +54,38 @@ def labels_for(people: list[Person], name_map: dict[str, str], style: str = "fir
     case "title" capitalises each word ("Cal_Smith_Dad"), keeping other capitals ("DJ").
     sep " " gives "Cal Smith Dad", which Blue Iris passes through to alert memos intact.
 
+    Accents are dropped ("Zoë" -> zoe); letters of other scripts are kept as they are.
     Labels never end in a digit: Blue Iris and Caesa treat trailing digits as a
-    registration number ("cal1" is cal).
+    registration number ("cal1" is cal). Labels from name_map are held to that too.
     """
     def slug(s: str) -> str:
-        s = re.sub(r"[^a-z0-9]+", "_", s, flags=re.I).strip("_").rstrip("0123456789_") or "person"
+        s = "".join(ch for ch in unicodedata.normalize("NFKD", s) if not unicodedata.combining(ch))
+        s = re.sub(r"[\W_]+", "_", s).strip("_").rstrip("0123456789_")
+        if not s:
+            return ""
         words = [w.lower() if case == "lower" else w[:1].upper() + w[1:] for w in s.split("_")]
         return sep.join(words)
+
+    def label(p: Person) -> str:
+        if p.name in name_map:
+            mapped = name_map[p.name].strip().rstrip("0123456789_ ")
+            if mapped != name_map[p.name]:
+                log.warning("IMMICHEYE_NAME_MAP label %r for %s used as %r: labels can't end in a digit",
+                            name_map[p.name], p.name, mapped)
+            if mapped:
+                return mapped
+        first = slug(p.name.split()[0])
+        full = slug(p.name)
+        if not full:
+            log.warning("Immich name %r has no letters to make a label from; using 'unnamed'", p.name)
+            return "unnamed"
+        return first if style == "first" and len(firsts[first.lower()]) == 1 else full
 
     # Clashes are between distinct names: unmerged duplicates of one name aren't a clash.
     firsts: dict[str, set[str]] = {}
     for p in people:
         firsts.setdefault(slug(p.name.split()[0]).lower(), set()).add(slug(p.name).lower())
-    out = {}
-    for p in people:
-        if p.name in name_map:
-            out[p.id] = name_map[p.name]
-        else:
-            first = slug(p.name.split()[0])
-            out[p.id] = first if style == "first" and len(firsts[first.lower()]) == 1 else slug(p.name)
-    return out
+    return {p.id: label(p) for p in people}
 
 
 @dataclass
@@ -114,6 +128,7 @@ class GalleryBuilder:
         self.crops = settings.data_dir / "crops"
         self.cache = self._load_cache()
         self.sem = asyncio.Semaphore(8)
+        self.shrinking = False   # the last build was held back for shrinking sharply
 
     def _load_cache(self) -> dict:
         try:
@@ -145,36 +160,43 @@ class GalleryBuilder:
         faces.sort(key=lambda f: f.short_side, reverse=True)
         return faces[: self.s.faces_per_person]
 
+    @staticmethod
+    def _crop(jpeg: bytes, face: FaceRef) -> bytes:
+        img = Image.open(io.BytesIO(jpeg))
+        img.load()
+        sx, sy = img.width / face.image_width, img.height / face.image_height
+        x1, y1, x2, y2 = face.x1 * sx, face.y1 * sy, face.x2 * sx, face.y2 * sy
+        mx, my = (x2 - x1) * CROP_MARGIN, (y2 - y1) * CROP_MARGIN
+        crop = img.convert("RGB").crop((
+            max(0, int(x1 - mx)), max(0, int(y1 - my)),
+            min(img.width, int(x2 + mx)), min(img.height, int(y2 + my)),
+        ))
+        buf = io.BytesIO()
+        crop.save(buf, "JPEG", quality=92)
+        return buf.getvalue()
+
     async def _embed(self, face: FaceRef) -> list[float] | None:
         async with self.sem:
             jpeg = await self.immich.preview(face.asset_id)
-            img = Image.open(io.BytesIO(jpeg))
-            img.load()
-            sx, sy = img.width / face.image_width, img.height / face.image_height
-            x1, y1, x2, y2 = face.x1 * sx, face.y1 * sy, face.x2 * sx, face.y2 * sy
-            mx, my = (x2 - x1) * CROP_MARGIN, (y2 - y1) * CROP_MARGIN
-            crop = img.convert("RGB").crop((
-                max(0, int(x1 - mx)), max(0, int(y1 - my)),
-                min(img.width, int(x2 + mx)), min(img.height, int(y2 + my)),
-            ))
-            buf = io.BytesIO()
-            crop.save(buf, "JPEG", quality=92)
-            found = await self.ml.faces(buf.getvalue(), self.s.detect_min_score)
+            crop = await asyncio.to_thread(self._crop, jpeg, face)
+            found = await self.ml.faces(crop, self.s.detect_min_score)
         if not found:
             return None
         # Kept for registering with CodeProject.AI (cpai_sync.py)
         self.crops.mkdir(parents=True, exist_ok=True)
-        (self.crops / f"{face.id}.jpg").write_bytes(buf.getvalue())
+        (self.crops / f"{face.id}.jpg").write_bytes(crop)
         # The crop is centred on one face; take the biggest in case a neighbour is in shot.
         return [round(float(x), 5) for x in biggest(found).embedding]
 
     async def _embed_lowres(self, face_id: str, sizes: list[int]) -> dict[str, list[float] | None]:
         """Embeddings of the saved crop shrunk to each size; None where no face was found."""
         out = {}
-        async with self.sem:   # one crop in memory per slot, not one per face
+        def shrunk() -> list[bytes | None]:
             crop = Image.open(self.crops / f"{face_id}.jpg").convert("RGB")
-            for px in sizes:
-                jpeg = shrink(crop, px)
+            return [shrink(crop, px) for px in sizes]
+
+        async with self.sem:   # one crop in memory per slot, not one per face
+            for px, jpeg in zip(sizes, await asyncio.to_thread(shrunk)):
                 found = await self.ml.faces(jpeg, self.s.detect_min_score) if jpeg else None
                 out[str(px)] = [round(float(x), 5) for x in biggest(found).embedding] if found else None
         return out
@@ -189,6 +211,7 @@ class GalleryBuilder:
 
         # The same label can cover several Immich people (e.g. an unmerged duplicate);
         # they pool their faces.
+        before = sum(1 for c in self.cache.values() if c.get("embedding") and c.get("label"))
         seen, new = set(), 0
         for person in people:
             try:
@@ -217,10 +240,23 @@ class GalleryBuilder:
                     self.cache[f.id]["label"] = labels[person.id]
                     seen.add(f.id)
 
+        # Immich answering with nobody, or with far fewer faces (a wrong key, a typo in
+        # IMMICHEYE_PEOPLE, a glitch) would wipe the gallery and CodeProject.AI's faces.
+        # Keep the previous gallery instead: never accept an empty one, and accept a sharp
+        # shrink only when the next build agrees.
+        after = sum(1 for k in seen if self.cache[k].get("embedding"))
+        if before and not after:
+            raise RuntimeError(f"Immich returned no usable faces (had {before}); keeping the previous gallery")
+        if before and after < before * SHRINK and not self.shrinking:
+            self.shrinking = True
+            raise RuntimeError(f"gallery would shrink from {before} to {after} faces; keeping the previous "
+                               "gallery until the next refresh confirms it")
+        self.shrinking = False
+
         # Drop faces no longer selected (renamed, reassigned, deleted or pushed out by newer photos).
         self.cache = {k: v for k, v in self.cache.items() if k in seen}
         new_lowres = await self._add_lowres()
-        self._save_cache()
+        await asyncio.to_thread(self._save_cache)   # tens of MB of JSON: not on the event loop
         if self.crops.exists():
             for crop in self.crops.glob("*.jpg"):
                 if crop.stem not in self.cache:

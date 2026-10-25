@@ -14,10 +14,12 @@ from PIL import Image
 from .ml import Face, ImmichML
 
 EDGE = 4   # a face box this close to a tile's inner edge is cut off; another tile has it whole
+MAX_TILES = 24   # 4K takes 8 tiles of 1280; anything needing more than this is searched whole only
 
 
 def tile_boxes(width: int, height: int, tile: int) -> list[tuple[int, int, int, int]]:
-    """Overlapping tiles covering the frame; none when it already fits in one."""
+    """Overlapping tiles covering the frame; none when it already fits in one, or would need
+    more than MAX_TILES (an oversized upload shouldn't queue dozens of Immich ML calls)."""
     if tile <= 0 or max(width, height) <= tile:
         return []
     overlap = tile // 4
@@ -27,7 +29,8 @@ def tile_boxes(width: int, height: int, tile: int) -> list[tuple[int, int, int, 
             return [0]
         return list(range(0, n - tile, tile - overlap)) + [n - tile]
 
-    return [(x, y, min(width, x + tile), min(height, y + tile)) for y in starts(height) for x in starts(width)]
+    boxes = [(x, y, min(width, x + tile), min(height, y + tile)) for y in starts(height) for x in starts(width)]
+    return boxes if len(boxes) <= MAX_TILES else []
 
 
 def _crops(jpeg: bytes, boxes: list[tuple[int, int, int, int]]) -> list[bytes]:
