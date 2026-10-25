@@ -434,14 +434,19 @@ def test_recognize_shares_names_within_an_alert(client, monkeypatch):
     assert post_as(client, ALERT.replace("1234", "1235")).json()["success"] is False
 
 
-def test_merge_memo_puts_names_after_person_within_50_chars():
+def test_merge_memo_keeps_unknown_and_fits_49_chars():
     memo = "person:86%,unknown,car:83%,vehicle:73%"
-    out = merge_memo(memo, {"Cal Smith": 0.745, "Bea Jones": 0.734})
-    assert out == "person:86%,Cal Smith:74%,Bea Jones:73%,car:83%" and len(out) <= 50
+    out = merge_memo(memo, {"Bea Jones": 0.734, "Cal Smith": 0.745})
+    assert out == "person:86%,Cal Smith:74%,Bea Jones:73%,unknown" and len(out) <= 49
     assert merge_memo("person:90%,Cal Smith:80%", {"Cal Smith": 0.7}) == "person:90%,Cal Smith:80%"
     assert merge_memo("", {"Bea": 0.75}) == "Bea:75%"
+    assert merge_memo("person:86%,unknown", {"Cal": 0.8}) == "person:86%,Cal:80%,unknown"
+    # a name that doesn't fit is left out whole, lowest score first
     long = merge_memo("person:86%,car:83%", {"Cal Smithson-Jones": 0.75, "Beatrice Jones": 0.74})
-    assert long == "person:86%,Cal Smithson-Jones:75%"   # a name that doesn't fit is left out, not cut
+    assert long == "person:86%,Cal Smithson-Jones:75%"
+    # Blue Iris cut its own memo at 49: the partial last label goes
+    cut = "person:94%,Bea Jones:80%,Cal Smith:71%,car:79%,ve"
+    assert merge_memo(cut[:49], {"Dan": 0.7}) == "person:94%,Bea Jones:80%,Cal Smith:71%,Dan:70%"
 
 
 BI = "http://bi.test/json"
@@ -489,10 +494,35 @@ def test_late_names_added_to_the_alert_memo(monkeypatch):
             late.observe("Drive", None, "Drive.20260101_120003Z.jpg", [pred("bea")])     # another camera
             late.observe("Front", None, "Front.20260101_120005Z.jpg", [pred("cal", 0.745)])
             await late.latest["front"].task
-            assert updates == [("@77.bvr", "person:86%,cal:74%")]
+            assert updates == [("@77.bvr", "person:86%,cal:74%,unknown")]
             late.observe("Front", None, "Front.20260101_120006Z.jpg", [pred("cal", 0.8)])   # nothing new
             assert late.latest["front"].task.done() and late.status()["updated"] == 1
             late.latest["front"].first -= 3600                                             # past the window
             late.observe("Front", None, "Front.20260101_130000Z.jpg", [pred("bea")])
             assert "bea" not in late.latest["front"].names
+    asyncio.run(run())
+
+
+@respx.mock
+def test_late_names_arriving_during_an_update_are_not_lost(monkeypatch):
+    monkeypatch.setattr(blueiris, "SETTLE_S", 0)
+    monkeypatch.setattr(blueiris, "DEBOUNCE_S", 0)
+    monkeypatch.setattr(blueiris, "RETRIES", ())
+    alert_file = "Front.20260101_120000Z.1234.3-1.jpg"
+    updates = fake_blueiris([{"camera": "Front", "path": "@77.bvr", "file": alert_file, "memo": "person:86%",
+                              "flags": 2}])
+    s = dataclasses.replace(server.settings, blueiris_url="http://bi.test", blueiris_user="u", blueiris_password="p")
+
+    async def run():
+        async with httpx.AsyncClient() as c:
+            late = LateNames(s, c)
+            set_memo = late.bi.set_memo
+
+            async def slow_set_memo(*args):   # bea is named while cal's update is in flight
+                late.observe("Front", None, "Front.20260101_120006Z.jpg", [pred("bea", 0.7)])
+                await set_memo(*args)
+            late.bi.set_memo = slow_set_memo
+            late.observe("Front", alert_key(alert_file), alert_file, [pred("cal", 0.8)])
+            await late.latest["front"].task
+            assert [m for _, m in updates] == ["person:86%,cal:80%", "person:86%,cal:80%,bea:70%"]
     asyncio.run(run())

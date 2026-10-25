@@ -314,12 +314,18 @@ Blue Iris never changes an alert's memo by itself.
 With `IMMICHEYE_BLUEIRIS_URL`, `_USER` and `_PASSWORD` set, ImmichEye remembers each camera's
 latest alert. When a name turns up within `IMMICHEYE_LATE_NAMES_S` (default 60) of it, in the
 alert's images or the camera's later frames, and the memo lacks it, ImmichEye adds it through
-Blue Iris's JSON API. `person:86%,unknown,car:83%` becomes `person:86%,Cal Smith:74%,car:83%`.
+Blue Iris's JSON API. `person:86%,unknown,car:83%` becomes
+`person:86%,Cal Smith:74%,unknown,car:83%`.
 
 - It needs a Blue Iris **admin** user: Blue Iris only lets admins change a memo. Create one
   for ImmichEye and keep `.env` private.
-- Names go after the first label and replace `unknown`. Blue Iris keeps only 50 characters of
-  a memo, so other labels are dropped from the end to make room.
+- Names go after the first label and any names already there, highest score first, with a
+  percentage like Blue Iris's own labels (apps such as Caesa skip labels without one).
+- Blue Iris keeps only the first 49 characters of a memo, its own included. To make room,
+  other labels are left out first, then `unknown`, then the lowest-scoring names: two full
+  names always fit with `person`.
+- Several people are handled: each new name updates the memo again, also while an update
+  is under way.
 - The alert in Blue Iris, its search and apps that read the memo get the name. A push
   notification already sent doesn't change.
 - Cancelled alerts aren't touched. `GET /immicheye/status` shows `late_names` (`updated`,

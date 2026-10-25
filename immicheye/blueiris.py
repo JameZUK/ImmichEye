@@ -7,8 +7,10 @@ remembers each camera's latest alert and, when a confident name turns up in that
 images or in the camera's frames within IMMICHEYE_LATE_NAMES_S of it, and the memo lacks
 it, adds it through Blue Iris's JSON API (`update` with the alert's path and a new memo).
 
-Names go after the object labels and replace "unknown". Blue Iris keeps only the first 50
-characters of a memo, so other labels are dropped from the end to make room. The push
+Names go after the first label (person), ahead of "unknown" and other labels, with a
+percentage like Blue Iris's own labels: apps that read the memo (Caesa) skip labels without
+one. Blue Iris keeps only the first 49 characters of a memo, its own included, so other
+labels, then "unknown", then the lowest-scoring names are left out to make room. The push
 notification Blue Iris already sent is not changed; the alert in Blue Iris and in apps that
 read its memo is.
 """
@@ -26,11 +28,24 @@ from .config import Settings
 
 log = logging.getLogger(__name__)
 
-MEMO_MAX = 50
+MEMO_MAX = 49     # Blue Iris cuts longer memos, its own included
 SETTLE_S = 6.0    # first update no sooner than this after the alert's first image: Blue Iris writes its own memo first
 DEBOUNCE_S = 2.0  # gather names arriving together into one update
 RETRIES = (3, 6, 12)   # seconds to wait for an alert Blue Iris hasn't listed yet
 KEEP_FLAGS = 2
+# Labels Blue Iris's object models give (COCO, plus its own); anything else in a memo is a face.
+OBJECTS = {
+    "person", "bicycle", "car", "motorcycle", "motorbike", "airplane", "aeroplane", "bus", "train", "truck",
+    "boat", "traffic light", "fire hydrant", "stop sign", "parking meter", "bench", "bird", "cat", "dog",
+    "horse", "sheep", "cow", "elephant", "bear", "zebra", "giraffe", "backpack", "umbrella", "handbag", "tie",
+    "suitcase", "frisbee", "skis", "snowboard", "sports ball", "kite", "baseball bat", "baseball glove",
+    "skateboard", "surfboard", "tennis racket", "bottle", "wine glass", "cup", "fork", "knife", "spoon",
+    "bowl", "chair", "couch", "potted plant", "bed", "dining table", "toilet", "tv", "laptop", "mouse",
+    "remote", "keyboard", "cell phone", "microwave", "oven", "toaster", "sink", "refrigerator", "book",
+    "clock", "vase", "scissors", "teddy bear", "hair drier", "toothbrush", "vehicle", "animal", "deer",
+    "rabbit", "raccoon", "fox", "coyote", "possum", "skunk", "squirrel", "pig", "package", "parcel",
+    "amazon", "fedex", "ups", "usps", "uhaul", "dhl", "plate", "dayplate", "nightplate", "unknown",
+}
 STAMP = re.compile(r"\.(\d{8}_\d{6})Z\.", re.I)
 
 
@@ -42,18 +57,24 @@ def alert_time(filename: str) -> float | None:
 
 
 def merge_memo(memo: str, names: dict[str, float]) -> str:
-    """memo with names (label -> confidence 0..1) added after the object labels, replacing
-    "unknown", cut to MEMO_MAX by dropping other labels from the end."""
+    """memo with names (label -> confidence 0..1) after its first label and any names already
+    there, highest score first. Within MEMO_MAX, other labels go first, then "unknown", then
+    the lowest-scoring names."""
     items = [i.strip() for i in (memo or "").split(",") if i.strip()]
-    have = {i.rsplit(":", 1)[0].lower() for i in items}
-    new = [f"{label}:{round(conf * 100)}%" for label, conf in names.items() if label.lower() not in have]
+    if len(memo or "") >= MEMO_MAX and items:
+        items.pop()   # Blue Iris cut the memo: its last label is probably partial
+    have = {i.rsplit(":", 1)[0].strip().lower() for i in items}
+    new = [f"{label}:{round(conf * 100)}%" for label, conf in sorted(names.items(), key=lambda n: -n[1])
+           if label.lower() not in have]
     if not new:
         return memo
-    items = [i for i in items if i.split(":")[0].strip().lower() != "unknown"]
+    def label(i):
+        return i.split(":")[0].strip().lower()
     first, rest = items[:1], items[1:]   # Blue Iris puts the confirming label (person) first
-    out = first + new + rest
-    while len(",".join(out)) > MEMO_MAX and len(out) > len(first) + len(new):
-        out.pop()
+    faces = [i for i in rest if label(i) not in OBJECTS]
+    unknown = [i for i in rest if label(i) == "unknown"]
+    others = [i for i in rest if i not in faces and i not in unknown]
+    out = first + faces + new + unknown + others
     while len(",".join(out)) > MEMO_MAX and len(out) > 1:
         out.pop()
     return ",".join(out)[:MEMO_MAX]
@@ -143,26 +164,26 @@ class LateNames:
 
     async def _flush(self, a: _Alert) -> None:
         await asyncio.sleep(max(DEBOUNCE_S, a.first + SETTLE_S - time.monotonic()))
-        if not set(a.names) - a.written:
-            return
         s = None
         try:
-            s = await self.bi.session()
-            found = await self.bi.find_alert(s, a.camera, a.file)
-            for wait in RETRIES:
-                if found is not None:
-                    break
-                await asyncio.sleep(wait)
+            # Names can arrive while an update is in flight; go round until none are left.
+            while pending := {n: c for n, c in a.names.items() if n not in a.written}:
+                s = s or await self.bi.session()
                 found = await self.bi.find_alert(s, a.camera, a.file)
-            if found is None:
-                return   # cancelled (no alert to name), or never listed
-            memo = found.get("memo") or ""
-            new = merge_memo(memo, {n: c for n, c in a.names.items() if n not in a.written})
-            if new != memo:
-                await self.bi.set_memo(s, found, new)
-                self.updated += 1
-                log.info("%s alert %s memo: %r -> %r", a.camera, found["path"], memo, new)
-            a.written |= set(a.names)
+                for wait in RETRIES:
+                    if found is not None:
+                        break
+                    await asyncio.sleep(wait)
+                    found = await self.bi.find_alert(s, a.camera, a.file)
+                if found is None:
+                    return   # cancelled (no alert to name), or never listed
+                memo = found.get("memo") or ""
+                new = merge_memo(memo, pending)
+                if new != memo:
+                    await self.bi.set_memo(s, found, new)
+                    self.updated += 1
+                    log.info("%s alert %s memo: %r -> %r", a.camera, found["path"], memo, new)
+                a.written |= set(pending)   # names that didn't fit count as done too
         except Exception as e:
             self.failed += 1
             self.last_error = f"{type(e).__name__}: {e}"
