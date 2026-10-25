@@ -1,3 +1,4 @@
+import asyncio
 import base64
 import dataclasses
 import json
@@ -18,6 +19,7 @@ import respx  # noqa: E402
 from fastapi.testclient import TestClient  # noqa: E402
 
 from immicheye import server  # noqa: E402
+from immicheye.alerts import AlertNames, alert_key  # noqa: E402
 from immicheye.gallery import Gallery, GalleryBuilder, labels_for  # noqa: E402
 from immicheye.immich import Person  # noqa: E402
 from immicheye.ml import Face  # noqa: E402
@@ -380,3 +382,51 @@ def test_events_only_for_chosen_cameras(client):
     post_as(client, "nodot")
     settle(sink)
     assert route.call_count == 1 and json.loads(route.calls.last.request.content)["camera"] == "Front"
+
+
+ALERT = "Front.20260101_120000Z.1234.3-1.jpg"
+
+
+def test_alert_key_only_for_alert_images():
+    assert alert_key(ALERT) == ALERT.lower()
+    assert alert_key("Drive.20260101_120000Z.17-0.jpg") is None   # no record number
+    assert alert_key("Front.20260101_120007Z.jpg") is None and alert_key(None) is None
+    assert alert_key("Drive.20260101_120000Z.1240.17-0.jpg")
+
+
+def pred(label, conf=0.75):
+    return {"confidence": conf if label != "unknown" else 0, "userid": label,
+            "x_min": 0, "y_min": 0, "x_max": 10, "y_max": 10}
+
+
+def test_alert_names_wait_for_a_later_image():
+    async def run():
+        names = AlertNames(hold_s=2)
+        held = asyncio.create_task(names.share("a", [pred("unknown")]))
+        await asyncio.sleep(0.05)
+        own, added, waited = await names.share("a", [pred("cal")])
+        assert [p["userid"] for p in own] == ["cal"] and not added and waited == 0
+        preds, added, waited = await held
+        assert [p["userid"] for p in preds] == ["unknown", "cal"] and added == ["cal"] and 0 < waited < 1000
+        # a later image with someone else gets cal too, without waiting
+        preds, added, waited = await names.share("a", [pred("bea", 0.8)])
+        assert added == ["cal"] and waited == 0
+        # another alert shares nothing; the hold counts from its first image, not each image
+        names.hold_s = 0.2
+        preds, added, waited = await names.share("b", [])
+        assert preds == [] and added == [] and waited >= 190
+        preds, added, waited = await names.share("b", [])
+        assert preds == [] and waited == 0
+    asyncio.run(run())
+
+
+def test_recognize_shares_names_within_an_alert(client, monkeypatch):
+    monkeypatch.setattr(server, "settings", dataclasses.replace(server.settings, alert_share=True, alert_hold_ms=0))
+    server.app.state.ml = FakeML([Face((10, 20, 50, 70), 0.9, unit(0.1, 1))])
+    assert post_as(client, ALERT).json()["predictions"][0]["userid"] == "cal"
+    server.app.state.ml = FakeML([])
+    body = post_as(client, ALERT).json()
+    assert body["success"] is True and [p["userid"] for p in body["predictions"]] == ["cal"]
+    # not shared with frames outside the alert, or with another alert
+    assert post_as(client, "Front.20260101_120007Z.jpg").json()["success"] is False
+    assert post_as(client, ALERT.replace("1234", "1235")).json()["success"] is False

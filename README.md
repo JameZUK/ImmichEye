@@ -26,6 +26,7 @@ Blue Iris knows after the next refresh.
 - [Managing people](#managing-people)
 - [CodeProject.AI's face database](#codeprojectais-face-database)
 - [When ImmichEye or Immich ML is down](#when-immicheye-or-immich-ml-is-down)
+- [Names in alerts](#names-in-alerts)
 - [Face events](#face-events)
 - [Accuracy](#accuracy)
 - [Tuning](#tuning)
@@ -282,6 +283,28 @@ never fall back. If you enable it, raise Blue Iris's face minimum confidence.
 The better fix is short outages: make sure the Immich machine-learning container starts on boot
 (ImmichEye's containers use `restart: unless-stopped`).
 
+## Names in alerts
+
+Blue Iris analyses an alert by sending ImmichEye up to about 20 images over 3–4 seconds,
+all with the alert's file name (`Front.20260101_120000Z.1234.3-1.jpg`). It then picks one of
+them, probably the one with the best `person` score, and the alert's memo lists only that
+image's faces. If that image shows a back or a blur, the alert goes out without a name even
+though other images in it named someone.
+
+`IMMICHEYE_ALERT_SHARE=1` fixes that within an alert:
+
+- Every reply includes the names confidently matched in any image of the same alert so far,
+  with the box of the image they were found in.
+- A reply with no name of its own waits for one, but only until `IMMICHEYE_ALERT_HOLD_MS`
+  (default 3000) after the alert's first image. The deadline is per alert, not per image:
+  Blue Iris is still sending the alert's later images during it, so an alert where nobody
+  is named isn't held up. In testing, nameless alerts were confirmed as fast as before.
+- Only alert images take part. The frames Blue Iris sends during the rest of a trigger
+  (`Front.20260101_120007Z.jpg`, no record number) are answered as usual.
+
+It can't help when nobody shows a usable face while the alert is being analysed, for
+example when people only face the camera after it has gone out.
+
 ## Face events
 
 ImmichEye can hand every face it detects to another service, such as a visitor log that counts
@@ -465,6 +488,8 @@ All settings go in `.env` (see `.env.example`).
 | `IMMICHEYE_CPAI_FALLBACK` | 0 | 1 = let CodeProject.AI answer when ImmichEye can't |
 | `IMMICHEYE_LOG_RECOGNITIONS` | 1 | Write `data/recognitions.jsonl` (rotated at 20 MB) |
 | `IMMICHEYE_SAVE_FACES` | 0 | Keep crops of the last N faces in `data/faces` |
+| `IMMICHEYE_ALERT_SHARE` | 0 | 1 = every reply in an alert includes names found in its other images (see [Names in alerts](#names-in-alerts)) |
+| `IMMICHEYE_ALERT_HOLD_MS` | 3000 | A reply with no name waits for one until this long after the alert's first image |
 | `IMMICHEYE_EVENTS_URL` | empty (off) | POST every detected face here (see [Face events](#face-events)) |
 | `IMMICHEYE_EVENTS_TOKEN` | empty | Sent as `Authorization: Bearer <token>` |
 | `IMMICHEYE_EVENTS_CAMERAS` | empty (all) | Comma-separated camera short names to send, e.g. `Front,Back` |

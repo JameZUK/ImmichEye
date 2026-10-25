@@ -19,6 +19,7 @@ from fastapi import FastAPI, Request, Response
 from fastapi.responses import JSONResponse
 
 from . import config
+from .alerts import AlertNames, alert_key
 from .cpai_sync import CpaiSync
 from .events import EventSink, context_box
 from .gallery import Gallery, GalleryBuilder
@@ -70,6 +71,7 @@ async def lifespan(app: FastAPI):
     log.info("loaded %d people, %d faces from cache", len(state["gallery"]), sum(state["gallery"].faces_per_label.values()))
     app.state.cpai = CpaiSync(settings, client)
     app.state.events = EventSink(settings, client)
+    app.state.alerts = AlertNames(settings.alert_hold_ms / 1000)
     tasks = [asyncio.create_task(refresh_loop(app.state.builder, app.state.cpai)),
              asyncio.create_task(app.state.events.run())]
     yield
@@ -179,18 +181,12 @@ async def recognize(request: Request) -> Response:
     if tiles:
         entry["tiles"] = tiles
 
-    if not faces:
-        log_recognition({**entry, "ms": inference_ms, "faces": []})
-        return cpai_envelope({"success": False, "error": "No face found in image", "inferenceMs": inference_ms},
-                             "recognize", started)
-
-    predictions, logged, events, found_known = [], [], [], False
+    predictions, logged, events = [], [], []
     for f in faces:
         matches = gallery.match(f.embedding, settings.top_k)
         best = matches[0]
         runner_up = matches[1].score if len(matches) > 1 else -1.0
         known = best.score >= settings.match_threshold and best.score - runner_up >= settings.match_margin
-        found_known |= known
         x1, y1, x2, y2 = (max(0, v) for v in f.box)
         predictions.append({
             # On CodeProject.AI's scale, (cosine + 1) / 2, so Blue Iris's one face
@@ -205,9 +201,20 @@ async def recognize(request: Request) -> Response:
         events.append({**logged[-1], "score": round(best.score, 3), "embedding": f.embedding})
 
     entry.update(ms=inference_ms, faces=logged)
+    alert = alert_key(entry["file"]) if settings.alert_share else None
+    if alert:
+        predictions, shared, entry["held_ms"] = await request.app.state.alerts.share(alert, predictions)
+        if shared:
+            entry["shared"] = shared
+        if entry["held_ms"] and await request.is_disconnected():
+            entry["gave_up"] = True   # Blue Iris stopped waiting for this reply
     request.app.state.events.submit(jpeg, entry, events)
     save_face_crops(jpeg, entry)
     log_recognition(entry)
+    if not predictions:
+        return cpai_envelope({"success": False, "error": "No face found in image", "inferenceMs": inference_ms},
+                             "recognize", started)
+    found_known = any(p["userid"] != "unknown" for p in predictions)
     return cpai_envelope({
         "message": "A face was recognised" if found_known else "No known faces",
         "count": len(predictions),

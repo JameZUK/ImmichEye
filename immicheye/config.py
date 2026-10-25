@@ -43,6 +43,8 @@ class Settings:
     events_token: str = ""           # sent as a Bearer token
     events_cameras: tuple[str, ...] = ()   # camera short names to send; empty = all
     events_frame_px: int = 0         # also send the frame scaled to this long side (0 = off)
+    alert_share: bool = False        # replies include names found in other images of the same alert
+    alert_hold_ms: int = 3000        # nameless replies wait for a name until this long after the alert's first image
 
 
 def load() -> Settings:
@@ -91,4 +93,6 @@ def load() -> Settings:
         events_token=_env("IMMICHEYE_EVENTS_TOKEN", ""),
         events_cameras=tuple(c.strip() for c in _env("IMMICHEYE_EVENTS_CAMERAS", "").split(",") if c.strip()),
         events_frame_px=int(_env("IMMICHEYE_EVENTS_FRAME_PX", "0")),
+        alert_share=_env("IMMICHEYE_ALERT_SHARE", "0") not in ("0", "false", "no"),
+        alert_hold_ms=int(_env("IMMICHEYE_ALERT_HOLD_MS", "3000")),
     )
