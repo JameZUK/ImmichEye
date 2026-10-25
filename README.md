@@ -294,7 +294,8 @@ or a face under 10 px from a sub-stream camera. Run `scripts/evaluate.py` and ch
 ### Speed
 
 The same 15 frames (5 photos, each resized to the three sizes Blue Iris typically sends) were
-posted to both servers from the host they run on, three times each after a warm-up. Times are
+posted to both servers from the host they run on, three times each after a warm-up. Both ran on
+an Nvidia GPU. Times are
 the whole request, upload included; median, with the slowest in brackets.
 
 | Frame size | ImmichEye | CodeProject.AI |
