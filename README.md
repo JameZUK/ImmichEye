@@ -26,6 +26,7 @@ Blue Iris knows after the next refresh.
 - [Managing people](#managing-people)
 - [CodeProject.AI's face database](#codeprojectais-face-database)
 - [When ImmichEye or Immich ML is down](#when-immicheye-or-immich-ml-is-down)
+- [Face events](#face-events)
 - [Accuracy](#accuracy)
 - [Tuning](#tuning)
 - [Settings reference](#settings-reference)
@@ -281,6 +282,43 @@ never fall back. If you enable it, raise Blue Iris's face minimum confidence.
 The better fix is short outages: make sure the Immich machine-learning container starts on boot
 (ImmichEye's containers use `restart: unless-stopped`).
 
+## Face events
+
+ImmichEye can hand every face it detects to another service, such as a visitor log that counts
+who came to the door and groups unknown visitors. The receiver gets the embedding ImmichEye
+already computed, so it needs no face model of its own. This is off unless
+`IMMICHEYE_EVENTS_URL` is set.
+
+For each frame with at least one face, ImmichEye POSTs JSON to that URL:
+
+```json
+{
+  "v": 1, "source": "immicheye", "id": "<uuid4, new per frame>",
+  "ts": 1792938423.881, "camera": "Front", "file": "Front.20261025_142653Z.jpg", "size": [3840, 2160],
+  "model": "buffalo_l", "threshold": 0.40, "margin": 0.05,
+  "frame": "<base64 JPEG, only with IMMICHEYE_EVENTS_FRAME_PX>",
+  "faces": [{
+    "box": [995, 830, 1041, 896], "det": 0.705,
+    "embedding": "<base64 of 512 little-endian float32, L2-normalised>",
+    "result": "Cal Smith", "score": 0.512,
+    "top": [["Cal Smith", 0.512], ["Bea", 0.231], ["Dan", 0.164]],
+    "crop": "<base64 JPEG of the face with context, at most 384 px>"
+  }]
+}
+```
+
+- `camera` is the filename up to the first `.`, which is Blue Iris's camera short name, or
+  `null` if there's no `.`.
+- `result` is exactly what Blue Iris was told: a label or `unknown`. `score` is the best
+  person's score, named or not.
+- `IMMICHEYE_EVENTS_TOKEN` is sent as `Authorization: Bearer <token>`.
+- Any 2xx reply counts as delivered.
+
+Sending never slows down or breaks recognition. Events are queued in the background, and when
+200 are waiting the oldest is dropped. Each POST has a 5 s timeout and is not retried. Failures
+are logged at most once a minute. `GET /immicheye/status` shows `events` (`sent`, `failed`,
+`dropped`, `last_error`). `/immicheye/explain` sends nothing.
+
 ## Accuracy
 
 ### Held-out Immich faces
@@ -427,6 +465,10 @@ All settings go in `.env` (see `.env.example`).
 | `IMMICHEYE_CPAI_FALLBACK` | 0 | 1 = let CodeProject.AI answer when ImmichEye can't |
 | `IMMICHEYE_LOG_RECOGNITIONS` | 1 | Write `data/recognitions.jsonl` (rotated at 20 MB) |
 | `IMMICHEYE_SAVE_FACES` | 0 | Keep crops of the last N faces in `data/faces` |
+| `IMMICHEYE_EVENTS_URL` | empty (off) | POST every detected face here (see [Face events](#face-events)) |
+| `IMMICHEYE_EVENTS_TOKEN` | empty | Sent as `Authorization: Bearer <token>` |
+| `IMMICHEYE_EVENTS_CAMERAS` | empty (all) | Comma-separated camera short names to send, e.g. `Front,Back` |
+| `IMMICHEYE_EVENTS_FRAME_PX` | 0 (off) | Also send the whole frame, long side scaled to at most this |
 
 ### What Blue Iris's minimum confidence means here
 
@@ -443,7 +485,7 @@ unauthenticated. Keep them off untrusted networks.
 
 | | |
 |---|---|
-| `GET /immicheye/status` | Gallery size, faces per label, last refresh and sync errors, settings in use |
+| `GET /immicheye/status` | Gallery size, faces per label, last refresh and sync errors, event delivery, settings in use |
 | `POST /immicheye/refresh` | Rebuild the gallery and sync CodeProject.AI now |
 | `POST /immicheye/explain` | Score a posted image (`image` field): every face with its five best matches |
 
@@ -484,8 +526,8 @@ matching), `cpai_sync.py` (CodeProject.AI sync), `immich.py` and `ml.py` (API cl
 ## Privacy
 
 ImmichEye sends Immich previews and camera frames only to your own Immich ML and CodeProject.AI
-servers, and reads from Immich with a read-only key. It stores reference face crops and
-embeddings, a recognition log and, if enabled, crops of faces from your cameras in `data/`.
+servers, and face events (embeddings and face crops) only to `IMMICHEYE_EVENTS_URL` if set. It
+reads from Immich with a read-only key. It stores reference face crops and embeddings, a recognition log and, if enabled, crops of faces from your cameras in `data/`.
 Recognising people on camera may be regulated where you live. Check before pointing cameras at
 public spaces.
 

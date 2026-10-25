@@ -39,6 +39,10 @@ class Settings:
     lowres_px: tuple[int, ...] = ()  # also embed each reference face shrunk to these widths
     label_case: str = "lower"        # "lower" (cal_smith) or "title" (Cal_Smith)
     label_sep: str = "_"             # between words: "_" (cal_smith) or " " (cal smith)
+    events_url: str = ""             # POST every detected face here (events.py); empty = off
+    events_token: str = ""           # sent as a Bearer token
+    events_cameras: tuple[str, ...] = ()   # camera short names to send; empty = all
+    events_frame_px: int = 0         # also send the frame scaled to this long side (0 = off)
 
 
 def load() -> Settings:
@@ -83,4 +87,8 @@ def load() -> Settings:
         label_case=case,
         label_sep=sep,
         lowres_px=tuple(int(p) for p in _env("IMMICHEYE_LOWRES_PX", "32,48").split(",") if p.strip()),
+        events_url=_env("IMMICHEYE_EVENTS_URL", ""),
+        events_token=_env("IMMICHEYE_EVENTS_TOKEN", ""),
+        events_cameras=tuple(c.strip() for c in _env("IMMICHEYE_EVENTS_CAMERAS", "").split(",") if c.strip()),
+        events_frame_px=int(_env("IMMICHEYE_EVENTS_FRAME_PX", "0")),
     )

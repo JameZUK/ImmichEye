@@ -20,6 +20,7 @@ from fastapi.responses import JSONResponse
 
 from . import config
 from .cpai_sync import CpaiSync
+from .events import EventSink, context_box
 from .gallery import Gallery, GalleryBuilder
 from .immich import Immich
 from .ml import ImmichML
@@ -68,9 +69,12 @@ async def lifespan(app: FastAPI):
     state["gallery"] = app.state.builder.from_cache()
     log.info("loaded %d people, %d faces from cache", len(state["gallery"]), sum(state["gallery"].faces_per_label.values()))
     app.state.cpai = CpaiSync(settings, client)
-    task = asyncio.create_task(refresh_loop(app.state.builder, app.state.cpai))
+    app.state.events = EventSink(settings, client)
+    tasks = [asyncio.create_task(refresh_loop(app.state.builder, app.state.cpai)),
+             asyncio.create_task(app.state.events.run())]
     yield
-    task.cancel()
+    for task in tasks:
+        task.cancel()
     await client.aclose()
 
 
@@ -133,8 +137,7 @@ def save_face_crops(jpeg: bytes, entry: dict) -> None:
         stamp = time.strftime("%Y%m%d-%H%M%S", time.localtime(entry["ts"])) + f"-{int(entry['ts'] * 1000) % 1000:03d}"
         for i, f in enumerate(entry["faces"]):
             x1, y1, x2, y2 = f["box"]
-            m = max(x2 - x1, y2 - y1) // 2
-            crop = img.crop((max(0, x1 - m), max(0, y1 - m), min(img.width, x2 + m), min(img.height, y2 + m)))
+            crop = img.crop(context_box(f["box"], img.width, img.height))
             score = f["top"][0][1] if f["top"] else 0
             name = f"{stamp}_{i}_{f['result']}_{f['top'][0][0] if f['top'] else 'none'}-{score:.2f}_{x2 - x1}px.jpg"
             crop.save(out / name, "JPEG", quality=90)
@@ -181,7 +184,7 @@ async def recognize(request: Request) -> Response:
         return cpai_envelope({"success": False, "error": "No face found in image", "inferenceMs": inference_ms},
                              "recognize", started)
 
-    predictions, logged, found_known = [], [], False
+    predictions, logged, events, found_known = [], [], [], False
     for f in faces:
         matches = gallery.match(f.embedding, settings.top_k)
         best = matches[0]
@@ -199,8 +202,10 @@ async def recognize(request: Request) -> Response:
         logged.append({"box": [x1, y1, x2, y2], "det": round(f.score, 3),
                        "top": [[m.label, round(m.score, 3)] for m in matches[:3]],
                        "result": predictions[-1]["userid"]})
+        events.append({**logged[-1], "score": round(best.score, 3), "embedding": f.embedding})
 
     entry.update(ms=inference_ms, faces=logged)
+    request.app.state.events.submit(jpeg, entry, events)
     save_face_crops(jpeg, entry)
     log_recognition(entry)
     return cpai_envelope({
@@ -238,7 +243,7 @@ async def register_face(request: Request) -> Response:
 
 
 @app.get("/immicheye/status")
-async def status() -> dict:
+async def status(request: Request) -> dict:
     g: Gallery = state["gallery"]
     return {
         "people": len(g),
@@ -255,6 +260,7 @@ async def status() -> dict:
         "cpai_sync_error": state["cpai_sync_error"],
         "match_threshold": settings.match_threshold,
         "match_margin": settings.match_margin,
+        "events": request.app.state.events.status(),
     }
 
 

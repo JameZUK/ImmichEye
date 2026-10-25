@@ -1,8 +1,11 @@
+import base64
 import dataclasses
 import json
 import io
 import os
+import time
 
+import httpx
 import numpy as np
 import pytest
 from PIL import Image
@@ -292,3 +295,88 @@ def test_space_separated_labels(monkeypatch):
     monkeypatch.setenv("IMMICHEYE_LABEL_SEPARATOR", "-")
     with pytest.raises(ValueError):
         config.load()
+
+
+EVENTS = "http://events.test/api/events"
+
+
+def events_on(client, **kw):
+    sink = server.app.state.events
+    sink.s = dataclasses.replace(server.settings, events_url=EVENTS, **kw)
+    return sink
+
+
+def settle(sink):
+    """Wait for the background sender to finish what was queued."""
+    for _ in range(200):
+        if not sink.pending:
+            return
+        time.sleep(0.01)
+    raise AssertionError("events still pending")
+
+
+def post_as(c, filename):
+    buf = io.BytesIO()
+    Image.new("RGB", (200, 120), "gray").save(buf, "JPEG")
+    return c.post("/v1/vision/face/recognize", files={"image": (filename, buf.getvalue(), "image/jpeg")})
+
+
+@respx.mock
+def test_events_off_by_default(client):
+    route = respx.post(EVENTS).respond(202)
+    server.app.state.ml = FakeML([Face((10, 20, 50, 70), 0.9, unit(0.1, 1))])
+    post_as(client, "Front.20261025_142653Z.jpg")
+    settle(server.app.state.events)
+    assert not route.called and server.app.state.events.status()["url_set"] is False
+
+
+@respx.mock
+def test_event_posted_for_each_frame_with_faces(client):
+    sink = events_on(client, events_token="tok", events_frame_px=64)
+    route = respx.post(EVENTS).respond(202, json={"accepted": 1})
+    server.app.state.ml = FakeML([Face((10, 20, 50, 70), 0.9, unit(0.1, 1))])
+    reply = post_as(client, "Front.20261025_142653Z.3870.3-1.jpg").json()
+    settle(sink)
+    assert route.call_count == 1
+    req = route.calls.last.request
+    assert req.headers["authorization"] == "Bearer tok"
+    ev = json.loads(req.content)
+    assert ev["v"] == 1 and ev["camera"] == "Front" and ev["size"] == [200, 120] and ev["model"] == "buffalo_l"
+    (f,) = ev["faces"]
+    emb = np.frombuffer(base64.b64decode(f["embedding"]), dtype="<f4")
+    assert emb.shape == (512,) and np.linalg.norm(emb) == pytest.approx(1, abs=1e-5)
+    assert f["result"] == reply["predictions"][0]["userid"] == "cal" and f["score"] > 0.9
+    assert Image.open(io.BytesIO(base64.b64decode(f["crop"]))).size == (75, 95)   # box grown by 25 px, clamped at 0
+    assert max(Image.open(io.BytesIO(base64.b64decode(ev["frame"]))).size) == 64
+    assert sink.status()["sent"] == 1
+
+    server.app.state.ml = FakeML([])   # no face: nothing sent
+    post_as(client, "Front.20261025_142700Z.jpg")
+    settle(sink)
+    assert route.call_count == 1
+
+
+@respx.mock
+@pytest.mark.parametrize("fail", [httpx.Response(500), httpx.ConnectError("down")])
+def test_event_failure_does_not_change_reply(client, fail):
+    sink = events_on(client)
+    server.app.state.ml = FakeML([Face((10, 20, 50, 70), 0.9, unit(0.1, 1))])
+    expected = post_as(client, "Front.x.jpg").json()["predictions"]
+    settle(sink)
+    respx.post(EVENTS).mock(side_effect=[fail])
+    before = client.get("/immicheye/status").json()["events"]["failed"]
+    assert post_as(client, "Front.y.jpg").json()["predictions"] == expected
+    settle(sink)
+    assert client.get("/immicheye/status").json()["events"]["failed"] == before + 1
+
+
+@respx.mock
+def test_events_only_for_chosen_cameras(client):
+    sink = events_on(client, events_cameras=("Front",))
+    route = respx.post(EVENTS).respond(202)
+    server.app.state.ml = FakeML([Face((10, 20, 50, 70), 0.9, unit(0.1, 1))])
+    post_as(client, "Drive.20261025_142653Z.jpg")
+    post_as(client, "Front.20261025_142653Z.jpg")
+    post_as(client, "nodot")
+    settle(sink)
+    assert route.call_count == 1 and json.loads(route.calls.last.request.content)["camera"] == "Front"
