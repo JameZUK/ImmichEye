@@ -317,8 +317,17 @@ On walks past two cameras running main stream, one person was named in about hal
 the frames where a face was detected (9 of 13 on the closer camera), with scores of 0.44–0.62.
 No frame was given the wrong name. Every
 "unknown" frame, checked with saved crops, was the top or back of a head, a motion-blurred face,
-or a face under 10 px from a sub-stream camera. Run `scripts/evaluate.py` and check
-`data/recognitions.jsonl` for your own figures; results depend on your photos and cameras.
+or a face under 10 px from a sub-stream camera.
+
+**With tiling and low-res copies.** On a 4K camera, no face had been found in 478 frames
+before tiling. On one walk past afterwards, faces (56–125 px) were found in 12 of its 22 frames
+and the person was named in 10 of the 13 faces, at 0.41–0.64. A 2560×1920 camera found faces of
+only 24–39 px, which were 6–10 px and undetectable at the whole-frame scale, and named the
+34–39 px ones. Faces under about 30 px still mostly came back `unknown` (scores 0.23–0.39), and
+no face was given the wrong name.
+
+Run `scripts/evaluate.py` and check `data/recognitions.jsonl` for your own figures; results
+depend on your photos and cameras.
 
 ### Speed
 
@@ -337,6 +346,11 @@ ImmichEye's own timing of live Blue Iris traffic, which leaves out the upload (t
 in `data/recognitions.jsonl`), had a median of about 15 ms for sub-stream frames and 35–50 ms
 for 2560×1920 and 4K frames. A request occasionally takes 0.5–4 s, when Immich ML reloads its
 model after an idle spell or requests queue up; 90% finished within 60 ms.
+
+Tiling adds detector passes to large frames, and Blue Iris sends them in bursts of about 20 per
+alert, so they queue. With tiling on, live medians were about 210 ms for 2560×1920, 400 ms for
+1080p and 4K, with the slowest at 0.8 s. Sub-stream frames are unchanged. Set
+`IMMICHEYE_TILE_PX=0` if that is too slow for your hardware.
 
 ## Tuning
 
