@@ -291,6 +291,23 @@ No frame was given the wrong name. Every
 or a face under 10 px from a sub-stream camera. Run `scripts/evaluate.py` and check
 `data/recognitions.jsonl` for your own figures; results depend on your photos and cameras.
 
+### Speed
+
+The same 15 frames (5 photos, each resized to the three sizes Blue Iris typically sends) were
+posted to both servers from the host they run on, three times each after a warm-up. Times are
+the whole request, upload included; median, with the slowest in brackets.
+
+| Frame size | ImmichEye | CodeProject.AI |
+|---|---|---|
+| 640×480 (typical sub-stream) | **34 ms** (39) | 73 ms (80) |
+| 1920×1080 | **53 ms** (67) | 84 ms (300) |
+| 3840×2160 (4K main stream) | 141 ms (172) | 134 ms (530) |
+
+ImmichEye's own timing of live Blue Iris traffic, which leaves out the upload (the `ms` field
+in `data/recognitions.jsonl`), had a median of about 15 ms for sub-stream frames and 35–50 ms
+for 2560×1920 and 4K frames. A request occasionally takes 0.5–4 s, when Immich ML reloads its
+model after an idle spell or requests queue up; 90% finished within 60 ms.
+
 ## Tuning
 
 Two thresholds decide every result:
