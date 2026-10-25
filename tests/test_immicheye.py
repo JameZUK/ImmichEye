@@ -552,3 +552,29 @@ def test_late_names_wait_for_blue_iris_to_confirm(monkeypatch):
             await late.latest["drive"].task
             assert updates == [("@77.bvr", "person:90%,cal:80%")]   # and the cancelled alert is left alone
     asyncio.run(run())
+
+
+@respx.mock
+def test_late_names_arriving_during_logout_are_not_lost(monkeypatch):
+    monkeypatch.setattr(blueiris, "SETTLE_S", 0)
+    monkeypatch.setattr(blueiris, "DEBOUNCE_S", 0)
+    monkeypatch.setattr(blueiris, "RETRIES", ())
+    alert_file = "Front.20260101_120000Z.1234.3-1.jpg"
+    updates = fake_blueiris([{"camera": "Front", "path": "@77.bvr", "file": alert_file, "memo": "person:86%",
+                              "flags": 0x14030002}])
+    s = dataclasses.replace(server.settings, blueiris_url="http://bi.test", blueiris_user="u", blueiris_password="p")
+
+    async def run():
+        async with httpx.AsyncClient() as c:
+            late = LateNames(s, c)
+            logout = late.bi.logout
+
+            async def slow_logout(sess):   # bea is named while cal's update is logging out
+                late.observe("Front", None, "Front.20260101_120007Z.jpg", [pred("bea", 0.7)])
+                await logout(sess)
+            late.bi.logout = slow_logout
+            late.observe("Front", alert_key(alert_file), alert_file, [pred("cal", 0.8)])
+            while not (task := late.latest["front"].task).done():
+                await task
+            assert [m for _, m in updates] == ["person:86%,cal:80%", "person:86%,cal:80%,bea:70%"]
+    asyncio.run(asyncio.wait_for(run(), 5))

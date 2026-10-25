@@ -166,38 +166,46 @@ class LateNames:
 
     async def _flush(self, a: _Alert) -> None:
         await asyncio.sleep(max(DEBOUNCE_S, a.first + SETTLE_S - time.monotonic()))
-        s = None
+        # Names can arrive at any await, so go round until none are left. Each round logs in
+        # and out itself, which makes the check below the task's last step: a name observed
+        # after it finds the task done and starts a flush of its own.
+        while pending := {n: c for n, c in a.names.items() if n not in a.written}:
+            try:
+                if not await self._write(a, pending):
+                    return
+            except Exception as e:
+                self.failed += 1
+                self.last_error = f"{type(e).__name__}: {e}"
+                log.warning("could not add late names to %s: %s", a.file, self.last_error)
+                return
+
+    async def _write(self, a: _Alert, pending: dict[str, float]) -> bool:
+        """Add pending to the alert's memo; False if the alert has nothing to name."""
+        s = await self.bi.session()
         try:
-            # Names can arrive while an update is in flight; go round until none are left.
-            while pending := {n: c for n, c in a.names.items() if n not in a.written}:
-                s = s or await self.bi.session()
-                # Blue Iris writes its own memo when it confirms the alert, over anything
-                # written before; wait until it has decided.
+            # Blue Iris writes its own memo when it confirms the alert, over anything
+            # written before; wait until it has decided.
+            found = await self.bi.find_alert(s, a.camera, a.file)
+            for wait in RETRIES:
+                if found is not None and int(found.get("flags", 0)) & (CONFIRMED | CANCELLED | OCCUPIED):
+                    break
+                await asyncio.sleep(wait)
                 found = await self.bi.find_alert(s, a.camera, a.file)
-                for wait in RETRIES:
-                    if found is not None and int(found.get("flags", 0)) & (CONFIRMED | CANCELLED | OCCUPIED):
-                        break
-                    await asyncio.sleep(wait)
-                    found = await self.bi.find_alert(s, a.camera, a.file)
-                flags = int(found.get("flags", 0)) if found else 0
-                if not flags & CONFIRMED or flags & (CANCELLED | OCCUPIED):
-                    if found is not None and not flags & (CANCELLED | OCCUPIED):
-                        log.info("%s alert %s not confirmed after %ds; names not added", a.camera, a.file, sum(RETRIES))
-                    return   # cancelled, still undecided, or never listed: nothing to name
-                memo = found.get("memo") or ""
-                new = merge_memo(memo, pending)
-                if new != memo:
-                    await self.bi.set_memo(s, found, new)
-                    self.updated += 1
-                    log.info("%s alert %s memo: %r -> %r", a.camera, found["path"], memo, new)
-                a.written |= set(pending)   # names that didn't fit count as done too
-        except Exception as e:
-            self.failed += 1
-            self.last_error = f"{type(e).__name__}: {e}"
-            log.warning("could not add late names to %s: %s", a.file, self.last_error)
+            flags = int(found.get("flags", 0)) if found else 0
+            if not flags & CONFIRMED or flags & (CANCELLED | OCCUPIED):
+                if found is not None and not flags & (CANCELLED | OCCUPIED):
+                    log.info("%s alert %s not confirmed after %ds; names not added", a.camera, a.file, sum(RETRIES))
+                return False   # cancelled, still undecided, or never listed: nothing to name
+            memo = found.get("memo") or ""
+            new = merge_memo(memo, pending)
+            if new != memo:
+                await self.bi.set_memo(s, found, new)
+                self.updated += 1
+                log.info("%s alert %s memo: %r -> %r", a.camera, found["path"], memo, new)
+            a.written |= set(pending)   # names that didn't fit count as done too
+            return True
         finally:
-            if s:
-                await self.bi.logout(s)
+            await self.bi.logout(s)
 
     def status(self) -> dict:
         return {"enabled": self.enabled, "updated": self.updated, "failed": self.failed, "last_error": self.last_error}
