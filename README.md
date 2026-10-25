@@ -200,9 +200,9 @@ wrongly assigned faces. Changes reach Blue Iris at the next refresh, or straight
 
 ### Labels
 
-Labels are the names Blue Iris sees. Words are joined by underscores, which Blue Iris and apps
-reading its alert memos handle reliably, and labels never end in a digit (Blue Iris treats a
-trailing number as a registration number: `cal1` is `cal`).
+Labels are the names Blue Iris sees. Words are joined by underscores by default, and labels
+never end in a digit (Blue Iris treats a trailing number as a registration number: `cal1` is
+`cal`).
 
 | `IMMICHEYE_LABELS` | "Cal Smith" | "Cal Brown" | "Bea Jones (Mum)" |
 |---|---|---|---|
@@ -211,7 +211,14 @@ trailing number as a registration number: `cal1` is `cal`).
 
 `IMMICHEYE_LABEL_CASE=title` capitalises each word instead (`Cal_Smith`, `Bea_Jones_Mum`),
 keeping capitals already in the Immich name (`Dan Lee (DJ)` becomes `Dan_Lee_DJ`).
-Changing it re-registers everyone in CodeProject.AI under the new spelling at the next refresh.
+`IMMICHEYE_LABEL_SEPARATOR=space` joins words with spaces instead (`Cal Smith`). Blue Iris
+accepts these and shows them intact in the alert memo (`person:85%,Cal Smith:62%`), so apps that
+split the memo on commas and colons read them fine. Labels with spaces haven't been tried in
+Blue Iris's own "To confirm" / "To cancel" boxes; use `person` there, or keep underscores if you
+filter on names.
+
+Changing either setting re-registers everyone in CodeProject.AI under the new spelling at the
+next refresh.
 
 With `first`, a label is the first name unless two different people share it. Override anyone
 with `IMMICHEYE_NAME_MAP`, e.g. `{"Bea Jones (Mum)": "mum"}`. Avoid labels that are also object
@@ -402,6 +409,7 @@ All settings go in `.env` (see `.env.example`).
 | `IMMICHEYE_PEOPLE` | all named | Comma-separated Immich names to recognise |
 | `IMMICHEYE_LABELS` | `first` | `first` or `full`; see [Labels](#labels) |
 | `IMMICHEYE_LABEL_CASE` | `lower` | `lower` (`cal_smith`) or `title` (`Cal_Smith`) |
+| `IMMICHEYE_LABEL_SEPARATOR` | `underscore` | `underscore` (`cal_smith`) or `space` (`cal smith`) |
 | `IMMICHEYE_NAME_MAP` | `{}` | JSON map of Immich name to label |
 | `IMMICHEYE_MODEL` | `buffalo_l` | Must match the facial recognition model in Immich's settings |
 | `IMMICHEYE_ASSETS_PER_PERSON` | 250 | Recent photos searched per person |

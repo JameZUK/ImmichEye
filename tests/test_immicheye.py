@@ -280,3 +280,15 @@ def test_cpai_sync_label_case_change_keeps_numbers(tmp_path):
     assert [r.request.content.split(b'name="userid"\r\n\r\n')[1].split(b"\r\n")[0] for r in reg.calls] == [b"Cal_Smith1"]
     assert [r.request.content for r in dele.calls] == [b"userid=cal_smith1"]
     assert sorted(json.loads((tmp_path / "cpai_sync.json").read_text())) == ["Cal_Smith1"]
+
+
+def test_space_separated_labels(monkeypatch):
+    from immicheye import config
+    people = [Person("1", "cal smith"), Person("2", "Bea Jones (Mum)")]
+    assert labels_for(people, {}, "full", "title", " ") == {"1": "Cal Smith", "2": "Bea Jones Mum"}
+    assert labels_for(people, {}, "full", "lower", " ")["1"] == "cal smith"
+    monkeypatch.setenv("IMMICHEYE_LABEL_SEPARATOR", "space")
+    assert config.load().label_sep == " "
+    monkeypatch.setenv("IMMICHEYE_LABEL_SEPARATOR", "-")
+    with pytest.raises(ValueError):
+        config.load()

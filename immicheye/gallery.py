@@ -44,19 +44,21 @@ def biggest(faces: list[Face]) -> Face:
 
 
 def labels_for(people: list[Person], name_map: dict[str, str], style: str = "first",
-               case: str = "lower") -> dict[str, str]:
-    """Immich name -> Blue Iris label, with underscores between words.
+               case: str = "lower", sep: str = "_") -> dict[str, str]:
+    """Immich name -> Blue Iris label, with sep between words.
 
     style "first": the first name, or the full name where first names clash.
     style "full": always the full name ("Cal Smith (Dad)" -> cal_smith_dad).
-    case "title" capitalises each word ("Cal_Smith_Dad"), keeping other capitals ("KJ").
+    case "title" capitalises each word ("Cal_Smith_Dad"), keeping other capitals ("DJ").
+    sep " " gives "Cal Smith Dad", which Blue Iris passes through to alert memos intact.
 
     Labels never end in a digit: Blue Iris and Caesa treat trailing digits as a
     registration number ("cal1" is cal).
     """
     def slug(s: str) -> str:
         s = re.sub(r"[^a-z0-9]+", "_", s, flags=re.I).strip("_").rstrip("0123456789_") or "person"
-        return "_".join(w[:1].upper() + w[1:] for w in s.split("_")) if case == "title" else s.lower()
+        words = [w.lower() if case == "lower" else w[:1].upper() + w[1:] for w in s.split("_")]
+        return sep.join(words)
 
     # Clashes are between distinct names: unmerged duplicates of one name aren't a clash.
     firsts: dict[str, set[str]] = {}
@@ -183,7 +185,7 @@ class GalleryBuilder:
         if self.s.people:
             wanted = {n.lower() for n in self.s.people}
             people = [p for p in people if p.name.lower() in wanted]
-        labels = labels_for(people, self.s.name_map, self.s.label_style, self.s.label_case)
+        labels = labels_for(people, self.s.name_map, self.s.label_style, self.s.label_case, self.s.label_sep)
 
         # The same label can cover several Immich people (e.g. an unmerged duplicate);
         # they pool their faces.
