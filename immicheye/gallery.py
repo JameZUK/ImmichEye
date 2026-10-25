@@ -3,6 +3,9 @@
 Each person's reference set is their largest faces among their most recent photos, so it
 tracks how people look now and favours faces with enough pixels to embed well. Embeddings
 are cached by Immich face id, so a refresh only embeds faces it hasn't seen.
+
+Each reference face is also embedded shrunk to a few CCTV-sized widths (IMMICHEYE_LOWRES_PX).
+A small, soft face from a camera matches those copies better than the sharp photo it came from.
 """
 import asyncio
 import io
@@ -17,11 +20,27 @@ from PIL import Image
 
 from .config import Settings
 from .immich import FaceRef, Immich, Person
-from .ml import ImmichML
+from .ml import Face, ImmichML
 
 log = logging.getLogger(__name__)
 
 CROP_MARGIN = 0.6   # context added around Immich's box (fraction of box size, each side)
+
+
+def shrink(crop: Image.Image, face_px: int) -> bytes | None:
+    """A reference crop scaled so the face is about face_px wide, as a camera would see it;
+    None if it is already that small."""
+    f = face_px * (1 + 2 * CROP_MARGIN) / crop.width
+    if f >= 1:
+        return None
+    small = crop.resize((max(8, round(crop.width * f)), max(8, round(crop.height * f))), Image.BILINEAR)
+    buf = io.BytesIO()
+    small.save(buf, "JPEG", quality=75)
+    return buf.getvalue()
+
+
+def biggest(faces: list[Face]) -> Face:
+    return max(faces, key=lambda f: (f.box[2] - f.box[0]) * (f.box[3] - f.box[1]))
 
 
 def labels_for(people: list[Person], name_map: dict[str, str], style: str = "first") -> dict[str, str]:
@@ -142,8 +161,18 @@ class GalleryBuilder:
         self.crops.mkdir(parents=True, exist_ok=True)
         (self.crops / f"{face.id}.jpg").write_bytes(buf.getvalue())
         # The crop is centred on one face; take the biggest in case a neighbour is in shot.
-        best = max(found, key=lambda f: (f.box[2] - f.box[0]) * (f.box[3] - f.box[1]))
-        return [round(float(x), 5) for x in best.embedding]
+        return [round(float(x), 5) for x in biggest(found).embedding]
+
+    async def _embed_lowres(self, face_id: str, sizes: list[int]) -> dict[str, list[float] | None]:
+        """Embeddings of the saved crop shrunk to each size; None where no face was found."""
+        out = {}
+        async with self.sem:   # one crop in memory per slot, not one per face
+            crop = Image.open(self.crops / f"{face_id}.jpg").convert("RGB")
+            for px in sizes:
+                jpeg = shrink(crop, px)
+                found = await self.ml.faces(jpeg, self.s.detect_min_score) if jpeg else None
+                out[str(px)] = [round(float(x), 5) for x in biggest(found).embedding] if found else None
+        return out
 
     async def build(self) -> Gallery:
         t0 = time.monotonic()
@@ -185,25 +214,50 @@ class GalleryBuilder:
 
         # Drop faces no longer selected (renamed, reassigned, deleted or pushed out by newer photos).
         self.cache = {k: v for k, v in self.cache.items() if k in seen}
+        new_lowres = await self._add_lowres()
         self._save_cache()
         if self.crops.exists():
             for crop in self.crops.glob("*.jpg"):
                 if crop.stem not in self.cache:
                     crop.unlink()
         g = self.from_cache()
-        log.info("gallery: %d people, %d faces (%d newly embedded) in %.0fs",
-                 len(g), len(g.owners), new, time.monotonic() - t0)
+        log.info("gallery: %d people, %d faces (%d newly embedded, %d low-res copies) in %.0fs",
+                 len(g), sum(g.faces_per_label.values()), new, new_lowres, time.monotonic() - t0)
         return g
+
+    async def _add_lowres(self) -> int:
+        todo = []
+        for fid, c in self.cache.items():
+            missing = [px for px in self.s.lowres_px if str(px) not in c.get("lowres", {})]
+            if c.get("embedding") and missing and (self.crops / f"{fid}.jpg").exists():
+                todo.append((fid, missing))
+
+        async def one(fid: str, sizes: list[int]) -> int:
+            try:
+                self.cache[fid].setdefault("lowres", {}).update(await self._embed_lowres(fid, sizes))
+                return len(sizes)
+            except Exception as e:
+                log.warning("low-res embedding of face %s failed: %r", fid, e)
+                return 0
+
+        return sum(await asyncio.gather(*(one(fid, sizes) for fid, sizes in todo)))
 
     def from_cache(self) -> Gallery:
         """The gallery as of the last build, without touching Immich: used at startup."""
         entries = [c for c in self.cache.values() if c.get("embedding") and c.get("label")]
         labels = sorted({c["label"] for c in entries})
         index = {label: i for i, label in enumerate(labels)}
+        owners, vectors = [], []
+        for c in entries:
+            lowres = c.get("lowres", {})
+            for v in [c["embedding"]] + [lowres.get(str(px)) for px in self.s.lowres_px]:
+                if v:
+                    owners.append(index[c["label"]])
+                    vectors.append(v)
         g = Gallery(
             labels=labels,
-            owners=np.asarray([index[c["label"]] for c in entries], dtype=np.int32),
-            embeddings=np.asarray([c["embedding"] for c in entries], dtype=np.float32).reshape(-1, 512),
+            owners=np.asarray(owners, dtype=np.int32),
+            embeddings=np.asarray(vectors, dtype=np.float32).reshape(-1, 512),
             built_at=time.time(),
         )
         for c in entries:

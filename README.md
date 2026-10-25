@@ -63,13 +63,18 @@ ImmichEye is stopped.
    how people look now and have enough detail;
 3. crops each face, with some surrounding context, from Immich's preview image;
 4. turns each crop into an embedding with the Immich machine-learning server. An embedding is a
-   list of 512 numbers describing the face, made by the same model Immich uses.
+   list of 512 numbers describing the face, made by the same model Immich uses;
+5. embeds each crop again shrunk to CCTV size (faces 32 and 48 px wide by default). A small,
+   soft face from a camera matches these copies better than the sharp photo they came from.
 
 Embeddings are cached by Immich face id, so a refresh (every 6 hours by default) only processes
 faces it hasn't seen before. A restart uses the cache straight away.
 
 **Recognition.** When Blue Iris detects a person, it sends the frame to `face/recognize`.
 ImmichEye passes the frame to Immich ML, which finds every face and makes an embedding for each.
+Immich ML shrinks every image to 640 px before looking for faces, which loses faces under about
+80 px in a 4K frame, so frames larger than 1280 px are also searched in overlapping 1280 px
+tiles and the results merged.
 Each face is then compared with every person in the gallery:
 
 - A person's score is the average similarity of their three closest reference faces (cosine
@@ -278,9 +283,33 @@ are the closest stand-in for CCTV.
 | Small, 30–60 px | 86% / **2.5%** / 11% | 41% / **53%** / 7% |
 | Larger, 80–400 px | 97% / **1.2%** / 2% | 52% / **45%** / 3% |
 
+These were measured before the low-res reference copies were added; see below.
+
 CodeProject.AI's figures are at Blue Iris's usual minimum confidence (0.40). Raising it removes
 right and wrong names together: at 0.80 it got 20% right and 8% wrong on larger faces. Part of
 the "wrong" share is the library's own duplicates, the same person under two spellings.
+
+### Small faces
+
+**Low-res reference copies.** 449 held-out faces from 62 people, at threshold 0.40 and margin
+0.05. Half size is closest to faces on a sub-stream or at a distance. "Stranger named" is how
+often a face is given a name when its own person is taken out of the gallery: a pessimistic
+stand-in for a visitor Immich doesn't know, since the closest "stranger" is often a relative.
+
+| Test faces | Without copies: correct / **wrong** / stranger named | With copies (default) |
+|---|---|---|
+| 30–60 px | 90.2% / **1.2%** / 7.9% | 92.9% / **1.2%** / 10.4% |
+| Half size, about 15–30 px | 73.5% / **1.0%** / 5.8% | 85.0% / **0.5%** / 8.7% |
+
+At threshold 0.45 with the copies, small faces are named as often as at 0.40 without them
+(73%) and strangers less often (4.5%). Raise the threshold if strangers matter more to you
+than naming people at a distance.
+
+**Tiling.** A face pasted into an empty 4K frame was only found by the detector at about 100 px
+or larger. With 1280 px tiles it was found down to 32 px, the smallest size tried. A 4K frame
+is searched in 8 tiles plus the whole frame, and a 1080p frame in 2 plus the whole frame. On the
+host above, a whole request took about 280 ms for 4K (140 ms without tiles) and 120 ms for
+1080p (55 ms). Sub-stream frames up to 1280 px aren't tiled.
 
 ### Real CCTV
 
@@ -334,8 +363,9 @@ tail -f data/recognitions.jsonl
 # Score any image
 curl -F image=@frame.jpg http://127.0.0.1:8000/immicheye/explain
 
-# Accuracy on your own library at a range of thresholds; --cpai also scores CodeProject.AI
-docker compose exec immicheye python scripts/evaluate.py [--cpai] [--min-px 30 --max-px 60]
+# Accuracy on your own library at a range of thresholds; --cpai also scores CodeProject.AI,
+# --scale 0.5 halves the test faces, --no-lowres leaves the low-res copies out
+docker compose exec immicheye python scripts/evaluate.py [--cpai] [--min-px 30 --max-px 60] [--scale 0.5] [--no-lowres]
 ```
 
 ## Settings reference
@@ -363,6 +393,8 @@ All settings go in `.env` (see `.env.example`).
 | `IMMICHEYE_MATCH_THRESHOLD` | 0.40 | See [Tuning](#tuning) |
 | `IMMICHEYE_MATCH_MARGIN` | 0.05 | See [Tuning](#tuning) |
 | `IMMICHEYE_TOP_K` | 3 | Reference faces averaged into a person's score |
+| `IMMICHEYE_LOWRES_PX` | `32,48` | Face widths the reference faces are also embedded at; empty = off |
+| `IMMICHEYE_TILE_PX` | 1280 | Frames larger than this are also searched in tiles of this size; 0 = off |
 | `IMMICHEYE_CPAI_SYNC` | `managed` | `off`, `managed` or `exclusive`; see [CodeProject.AI's face database](#codeprojectais-face-database) |
 | `IMMICHEYE_CPAI_PROTOTYPES` | 4 | CodeProject.AI entries per person |
 | `IMMICHEYE_CPAI_FALLBACK` | 0 | 1 = let CodeProject.AI answer when ImmichEye can't |

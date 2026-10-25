@@ -35,6 +35,8 @@ class Settings:
     cpai_sync: str = "managed"       # off | managed | exclusive: see cpai_sync.py
     cpai_prototypes: int = 4         # CodeProject.AI userids per person (label1..labelN)
     save_faces: int = 0              # keep crops of the last N recognised-or-not faces (0 = off)
+    tile_px: int = 1280              # also search frames larger than this in tiles (0 = off)
+    lowres_px: tuple[int, ...] = ()  # also embed each reference face shrunk to these widths
 
 
 def load() -> Settings:
@@ -69,4 +71,6 @@ def load() -> Settings:
         cpai_sync=sync,
         cpai_prototypes=int(_env("IMMICHEYE_CPAI_PROTOTYPES", "4")),
         save_faces=int(_env("IMMICHEYE_SAVE_FACES", "0")),
+        tile_px=int(_env("IMMICHEYE_TILE_PX", "1280")),
+        lowres_px=tuple(int(p) for p in _env("IMMICHEYE_LOWRES_PX", "32,48").split(",") if p.strip()),
     )

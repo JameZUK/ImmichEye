@@ -202,3 +202,46 @@ def test_saves_face_crops(client, monkeypatch, tmp_path):
     post(client)
     crops = list((tmp_path / "faces").glob("*.jpg"))
     assert len(crops) == 1 and "_cal_cal-" in crops[0].name and crops[0].name.endswith("_40px.jpg")
+
+
+def test_tile_boxes_cover_large_frames_with_overlap():
+    from immicheye.tiles import tile_boxes
+    assert tile_boxes(1280, 720, 1280) == [] and tile_boxes(3840, 2160, 0) == []
+    boxes = tile_boxes(3840, 2160, 1280)
+    assert len(boxes) == 8 and all(x2 - x1 == 1280 and y2 - y1 == 1280 for x1, y1, x2, y2 in boxes)
+    assert {b[2] for b in boxes} >= {3840} and {b[3] for b in boxes} >= {2160}
+    xs = sorted({b[0] for b in boxes})
+    assert all(b - a <= 1280 - 320 for a, b in zip(xs, xs[1:]))   # neighbours overlap by at least 320
+
+
+def test_merge_moves_tile_faces_and_drops_cut_and_duplicate_faces():
+    from immicheye.tiles import merge
+    e = unit(1, 0)
+    whole = [Face((100, 100, 300, 300), 0.8, e)]
+    tiled = [
+        ((0, 0, 1280, 1280), [Face((110, 105, 290, 295), 0.9, e),     # the whole-frame face again
+                              Face((1240, 500, 1278, 540), 0.9, e)]),  # cut off by the inner edge
+        ((960, 0, 2240, 1280), [Face((280, 500, 318, 540), 0.85, e)]),  # same small face, whole
+    ]
+    faces = merge(whole, tiled, 2240, 1280)
+    assert sorted(f.box for f in faces) == [(110, 105, 290, 295), (1240, 500, 1278, 540)]
+
+
+def test_gallery_includes_configured_lowres_copies(tmp_path):
+    s = dataclasses.replace(server.settings, data_dir=tmp_path, lowres_px=(32,))
+    b = GalleryBuilder(s, None, None)
+    b.cache = {
+        "f1": {"person_id": "p1", "asset_id": "a", "embedding": unit(1, 0).tolist(), "label": "bea",
+               "lowres": {"32": unit(1, 0.2).tolist(), "48": unit(1, 0.1).tolist()}},
+        "f2": {"person_id": "p2", "asset_id": "a", "embedding": unit(0, 1).tolist(), "label": "cal",
+               "lowres": {"32": None}},
+    }
+    g = b.from_cache()
+    assert len(g.owners) == 3 and g.faces_per_label == {"bea": 1, "cal": 1}
+
+
+def test_shrink_scales_face_to_width():
+    from immicheye.gallery import shrink
+    crop = Image.new("RGB", (220, 260))   # a 100 px face plus margin
+    small = Image.open(io.BytesIO(shrink(crop, 32)))
+    assert small.width == 70 and shrink(Image.new("RGB", (60, 70)), 32) is None

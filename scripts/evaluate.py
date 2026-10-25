@@ -4,11 +4,15 @@ Held-out test faces are each person's small faces (default 30-60 px short side),
 gallery skips (IMMICHEYE_MIN_FACE_PX) and which look like CCTV crops. Each one is cropped
 from its preview, downscaled further if asked, and matched against the gallery.
 
+"stranger named" is how often the face would get a name if its own person weren't in the
+gallery: the risk of naming someone Immich doesn't know.
+
 usage (same environment as the service, gallery already built):
-    python scripts/evaluate.py [--per-person 15] [--min-px 30] [--max-px 60] [--scale 1.0]
+    python scripts/evaluate.py [--per-person 15] [--min-px 30] [--max-px 60] [--scale 1.0] [--no-lowres]
 """
 import argparse
 import asyncio
+import dataclasses
 import io
 import random
 
@@ -24,15 +28,19 @@ from immicheye.ml import ImmichML
 
 async def main(a):
     s = config.load()
+    if a.no_lowres:
+        s = dataclasses.replace(s, lowres_px=())
     async with httpx.AsyncClient(limits=httpx.Limits(max_connections=16)) as c:
         immich, ml = Immich(s.immich_url, s.immich_api_key, c), ImmichML(s.ml_url, s.model, c)
         builder = GalleryBuilder(s, immich, ml)
-        g = builder.from_cache()
         in_gallery = set(builder.cache)
         people = await immich.people()
         if s.people:
             people = [p for p in people if p.name.lower() in {n.lower() for n in s.people}]
         labels = labels_for(people, s.name_map, s.label_style)
+        for c in builder.cache.values():   # the cache may predate a label setting change
+            c["label"] = labels.get(c["person_id"])
+        g = builder.from_cache()
         sem = asyncio.Semaphore(8)
         cpai_sem = asyncio.Semaphore(2)   # a live server: don't crowd out Blue Iris
         rng = random.Random(1)
@@ -85,19 +93,24 @@ async def main(a):
     undetected = sum(1 for _, m, _ in results if m is None)
     scored = [(truth, m) for truth, m, _ in results if m]
     print(f"{len(results)} test faces from {len(people)} people; {undetected} not detected at all")
-    print(f"{'threshold':>9} {'margin':>6} {'correct':>8} {'wrong':>6} {'unknown':>8}")
+    def named(m, thr, margin):
+        ru = m[1].score if len(m) > 1 else -1
+        return m[0].score >= thr and m[0].score - ru >= margin
+
+    print(f"{'threshold':>9} {'margin':>6} {'correct':>8} {'wrong':>6} {'unknown':>8} {'stranger named':>15}")
     for thr in (0.30, 0.35, 0.40, 0.45, 0.50):
         for margin in (0.0, 0.05, 0.10):
-            right = wrong = unknown = 0
+            right = wrong = unknown = stranger = 0
             for truth, m in scored:
-                ru = m[1].score if len(m) > 1 else -1
-                if m[0].score >= thr and m[0].score - ru >= margin:
+                if named(m, thr, margin):
                     right += m[0].label == truth
                     wrong += m[0].label != truth
                 else:
                     unknown += 1
+                others = [x for x in m if x.label != truth]
+                stranger += bool(others) and named(others, thr, margin)
             n = len(scored) or 1
-            print(f"{thr:9.2f} {margin:6.2f} {right / n:8.1%} {wrong / n:6.1%} {unknown / n:8.1%}")
+            print(f"{thr:9.2f} {margin:6.2f} {right / n:8.1%} {wrong / n:6.1%} {unknown / n:8.1%} {stranger / n:15.1%}")
     true_scores = [next((x.score for x in m if x.label == truth), np.nan) for truth, m in scored]
     other_best = [max((x.score for x in m if x.label != truth), default=np.nan) for truth, m in scored]
     print(f"same-person score  median {np.nanmedian(true_scores):.3f}  p10 {np.nanpercentile(true_scores, 10):.3f}")
@@ -119,5 +132,6 @@ if __name__ == "__main__":
     ap.add_argument("--min-px", type=int, default=30)
     ap.add_argument("--max-px", type=int, default=60)
     ap.add_argument("--scale", type=float, default=1.0, help="downscale crops further, e.g. 0.5")
+    ap.add_argument("--no-lowres", action="store_true", help="leave the low-res reference copies out")
     ap.add_argument("--cpai", action="store_true", help="also score CodeProject.AI (after a sync) on the same faces")
     asyncio.run(main(ap.parse_args()))

@@ -23,6 +23,7 @@ from .cpai_sync import CpaiSync
 from .gallery import Gallery, GalleryBuilder
 from .immich import Immich
 from .ml import ImmichML
+from .tiles import detect
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 logging.getLogger("httpx").setLevel(logging.WARNING)
@@ -65,7 +66,7 @@ async def lifespan(app: FastAPI):
     app.state.ml = ImmichML(settings.ml_url, settings.model, client)
     app.state.builder = GalleryBuilder(settings, Immich(settings.immich_url, settings.immich_api_key, client), app.state.ml)
     state["gallery"] = app.state.builder.from_cache()
-    log.info("loaded %d people, %d faces from cache", len(state["gallery"]), len(state["gallery"].owners))
+    log.info("loaded %d people, %d faces from cache", len(state["gallery"]), sum(state["gallery"].faces_per_label.values()))
     app.state.cpai = CpaiSync(settings, client)
     task = asyncio.create_task(refresh_loop(app.state.builder, app.state.cpai))
     yield
@@ -159,19 +160,21 @@ async def recognize(request: Request) -> Response:
         return cpai_envelope({"success": False, "error": "No image provided"}, "recognize", started)
     jpeg = await upload.read()
     try:
-        size = list(Image.open(io.BytesIO(jpeg)).size)   # reads the header only
+        size = Image.open(io.BytesIO(jpeg)).size   # reads the header only
     except Exception:
         size = None
-    entry = {"ts": time.time(), "file": getattr(upload, "filename", None), "size": size,
+    entry = {"ts": time.time(), "file": getattr(upload, "filename", None), "size": list(size or ()) or None,
              "bytes": len(jpeg), "min_confidence": form.get("min_confidence")}
 
     t = time.perf_counter()
     try:
-        faces = await request.app.state.ml.faces(jpeg, settings.detect_min_score)
+        faces, tiles = await detect(request.app.state.ml, jpeg, settings.detect_min_score, settings.tile_px, size)
     except Exception as e:
         log.warning("Immich ML failed: %s", e)
         return await unavailable(request, body, started, "Immich ML unavailable")
     inference_ms = int((time.perf_counter() - t) * 1000)
+    if tiles:
+        entry["tiles"] = tiles
 
     if not faces:
         log_recognition({**entry, "ms": inference_ms, "faces": []})
@@ -239,7 +242,8 @@ async def status() -> dict:
     g: Gallery = state["gallery"]
     return {
         "people": len(g),
-        "faces": len(g.owners),
+        "faces": sum(g.faces_per_label.values()),
+        "embeddings": len(g.owners),
         "faces_per_label": g.faces_per_label,
         "built_at": g.built_at,
         "refreshing": state["refreshing"],
@@ -263,7 +267,9 @@ async def explain(request: Request) -> dict:
     upload = (await request.form()).get("image")
     if upload is None or isinstance(upload, str):
         return {"error": "post the image as multipart field 'image'"}
-    faces = await request.app.state.ml.faces(await upload.read(), settings.detect_min_score)
+    jpeg = await upload.read()
+    size = Image.open(io.BytesIO(jpeg)).size
+    faces, _ = await detect(request.app.state.ml, jpeg, settings.detect_min_score, settings.tile_px, size)
     return {"faces": [{
         "box": list(f.box),
         "det": round(f.score, 3),
