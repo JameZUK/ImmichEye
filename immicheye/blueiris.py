@@ -7,7 +7,8 @@ remembers each camera's latest alert and, when a confident name turns up in that
 images or in the camera's frames within IMMICHEYE_LATE_NAMES_S of it, and the memo lacks
 it, adds it through Blue Iris's JSON API (`update` with the alert's path and a new memo).
 
-Names go after the first label (person), ahead of "unknown" and other labels, with a
+Updates wait until Blue Iris has confirmed the alert, as it writes its own memo then, over
+anything written earlier; cancelled alerts are left alone. Names go after the first label (person), ahead of "unknown" and other labels, with a
 percentage like Blue Iris's own labels: apps that read the memo (Caesa) skip labels without
 one. Blue Iris keeps only the first 49 characters of a memo, its own included, so other
 labels, then "unknown", then the lowest-scoring names are left out to make room. The push
@@ -31,8 +32,9 @@ log = logging.getLogger(__name__)
 MEMO_MAX = 49     # Blue Iris cuts longer memos, its own included
 SETTLE_S = 6.0    # first update no sooner than this after the alert's first image: Blue Iris writes its own memo first
 DEBOUNCE_S = 2.0  # gather names arriving together into one update
-RETRIES = (3, 6, 12)   # seconds to wait for an alert Blue Iris hasn't listed yet
-KEEP_FLAGS = 2
+RETRIES = (3, 6, 12, 24)   # seconds to wait for Blue Iris to list, then confirm or cancel, the alert
+KEEP_FLAGS = 2            # FLAGGED: a memo-only update clears it
+CONFIRMED, CANCELLED, OCCUPIED = 1 << 28, 1 << 23, 1 << 29
 # Labels Blue Iris's object models give (COCO, plus its own); anything else in a memo is a face.
 OBJECTS = {
     "person", "bicycle", "car", "motorcycle", "motorbike", "airplane", "aeroplane", "bus", "train", "truck",
@@ -169,14 +171,19 @@ class LateNames:
             # Names can arrive while an update is in flight; go round until none are left.
             while pending := {n: c for n, c in a.names.items() if n not in a.written}:
                 s = s or await self.bi.session()
+                # Blue Iris writes its own memo when it confirms the alert, over anything
+                # written before; wait until it has decided.
                 found = await self.bi.find_alert(s, a.camera, a.file)
                 for wait in RETRIES:
-                    if found is not None:
+                    if found is not None and int(found.get("flags", 0)) & (CONFIRMED | CANCELLED | OCCUPIED):
                         break
                     await asyncio.sleep(wait)
                     found = await self.bi.find_alert(s, a.camera, a.file)
-                if found is None:
-                    return   # cancelled (no alert to name), or never listed
+                flags = int(found.get("flags", 0)) if found else 0
+                if not flags & CONFIRMED or flags & (CANCELLED | OCCUPIED):
+                    if found is not None and not flags & (CANCELLED | OCCUPIED):
+                        log.info("%s alert %s not confirmed after %ds; names not added", a.camera, a.file, sum(RETRIES))
+                    return   # cancelled, still undecided, or never listed: nothing to name
                 memo = found.get("memo") or ""
                 new = merge_memo(memo, pending)
                 if new != memo:

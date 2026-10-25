@@ -510,7 +510,7 @@ def test_late_names_arriving_during_an_update_are_not_lost(monkeypatch):
     monkeypatch.setattr(blueiris, "RETRIES", ())
     alert_file = "Front.20260101_120000Z.1234.3-1.jpg"
     updates = fake_blueiris([{"camera": "Front", "path": "@77.bvr", "file": alert_file, "memo": "person:86%",
-                              "flags": 2}])
+                              "flags": 0x14030002}])
     s = dataclasses.replace(server.settings, blueiris_url="http://bi.test", blueiris_user="u", blueiris_password="p")
 
     async def run():
@@ -525,4 +525,30 @@ def test_late_names_arriving_during_an_update_are_not_lost(monkeypatch):
             late.observe("Front", alert_key(alert_file), alert_file, [pred("cal", 0.8)])
             await late.latest["front"].task
             assert [m for _, m in updates] == ["person:86%,cal:80%", "person:86%,cal:80%,bea:70%"]
+    asyncio.run(run())
+
+
+@respx.mock
+def test_late_names_wait_for_blue_iris_to_confirm(monkeypatch):
+    monkeypatch.setattr(blueiris, "SETTLE_S", 0)
+    monkeypatch.setattr(blueiris, "DEBOUNCE_S", 0)
+    monkeypatch.setattr(blueiris, "RETRIES", (0.05, 0.05, 0.05))
+    alert_file = "Front.20260101_120000Z.1234.3-1.jpg"
+    alert = {"camera": "Front", "path": "@77.bvr", "file": alert_file, "memo": "", "flags": 0x20002}   # analysing
+    cancelled = {"camera": "Drive", "path": "@78.bvr", "file": "Drive.20260101_120000Z.99.3-1.jpg",
+                 "memo": "", "flags": 0x820002}
+    updates = fake_blueiris([alert, cancelled])
+    s = dataclasses.replace(server.settings, blueiris_url="http://bi.test", blueiris_user="u", blueiris_password="p")
+
+    async def run():
+        async with httpx.AsyncClient() as c:
+            late = LateNames(s, c)
+            late.observe("Front", alert_key(alert_file), alert_file, [pred("cal", 0.8)])
+            late.observe("Drive", alert_key(cancelled["file"]), cancelled["file"], [pred("bea", 0.8)])
+            await asyncio.sleep(0.07)
+            assert updates == []                     # not while Blue Iris is still deciding
+            alert.update(memo="person:90%", flags=0x14030002)   # Blue Iris confirms and writes its memo
+            await late.latest["front"].task
+            await late.latest["drive"].task
+            assert updates == [("@77.bvr", "person:90%,cal:80%")]   # and the cancelled alert is left alone
     asyncio.run(run())

@@ -328,7 +328,9 @@ Blue Iris's JSON API. `person:86%,unknown,car:83%` becomes
   is under way.
 - The alert in Blue Iris, its search and apps that read the memo get the name. A push
   notification already sent doesn't change.
-- Cancelled alerts aren't touched. `GET /immicheye/status` shows `late_names` (`updated`,
+- Updates wait until Blue Iris has confirmed the alert: it writes its own memo then, over
+  anything written earlier. With a long analysis window (many post-trigger images) that can
+  be 10 s or more after the trigger. Cancelled alerts aren't touched. `GET /immicheye/status` shows `late_names` (`updated`,
   `failed`, `last_error`).
 - The frames after an alert come from the camera's AI settings. In testing they stopped when
   static object analysis was turned off.
