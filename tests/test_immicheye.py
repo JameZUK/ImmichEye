@@ -245,3 +245,38 @@ def test_shrink_scales_face_to_width():
     crop = Image.new("RGB", (220, 260))   # a 100 px face plus margin
     small = Image.open(io.BytesIO(shrink(crop, 32)))
     assert small.width == 70 and shrink(Image.new("RGB", (60, 70)), 32) is None
+
+
+def test_title_case_labels():
+    people = [Person("1", "cal smith"), Person("2", "Bea"), Person("3", "Dan Lee (DJ)"),
+              Person("4", "Eve O'Neil"), Person("5", "Cal Brown")]
+    assert labels_for(people, {}, "full", "title") == {
+        "1": "Cal_Smith", "2": "Bea", "3": "Dan_Lee_DJ", "4": "Eve_O_Neil", "5": "Cal_Brown"}
+    first = labels_for(people, {}, "first", "title")
+    assert first["2"] == "Bea" and first["1"] == "Cal_Smith" and first["3"] == "Dan"
+
+
+@respx.mock
+def test_cpai_sync_label_case_change_keeps_numbers(tmp_path):
+    import asyncio
+    import httpx
+    from immicheye.cpai_sync import CpaiSync
+    s = dataclasses.replace(server.settings, data_dir=tmp_path, cpai_sync="managed", cpai_prototypes=1)
+    crops = tmp_path / "crops"
+    crops.mkdir()
+    cache = {f"f{i}": {"person_id": "p", "asset_id": "a", "label": "Cal_Smith", "embedding": unit(1, i).tolist()}
+             for i in range(8)}
+    for fid in cache:
+        (crops / f"{fid}.jpg").write_bytes(jpeg())
+    (tmp_path / "cpai_sync.json").write_text('{"cal_smith1": "old"}')
+    respx.post("http://cpai.test/v1/vision/face/list").respond(json={"success": True, "faces": ["cal_smith1"]})
+    reg = respx.post("http://cpai.test/v1/vision/face/register").respond(json={"success": True})
+    dele = respx.post("http://cpai.test/v1/vision/face/delete").respond(json={"success": True})
+
+    async def go():
+        async with httpx.AsyncClient() as c:
+            await CpaiSync(s, c).sync(cache, crops)
+    asyncio.run(go())
+    assert [r.request.content.split(b'name="userid"\r\n\r\n')[1].split(b"\r\n")[0] for r in reg.calls] == [b"Cal_Smith1"]
+    assert [r.request.content for r in dele.calls] == [b"userid=cal_smith1"]
+    assert sorted(json.loads((tmp_path / "cpai_sync.json").read_text())) == ["Cal_Smith1"]

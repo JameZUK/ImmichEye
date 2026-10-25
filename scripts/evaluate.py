@@ -37,7 +37,7 @@ async def main(a):
         people = await immich.people()
         if s.people:
             people = [p for p in people if p.name.lower() in {n.lower() for n in s.people}]
-        labels = labels_for(people, s.name_map, s.label_style)
+        labels = labels_for(people, s.name_map, s.label_style, s.label_case)
         for c in builder.cache.values():   # the cache may predate a label setting change
             c["label"] = labels.get(c["person_id"])
         g = builder.from_cache()

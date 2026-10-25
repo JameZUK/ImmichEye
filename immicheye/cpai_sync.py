@@ -90,12 +90,14 @@ class CpaiSync:
         taken = others | {u.lower() for u in managed}
         for label, groups in sorted(self.desired(cache).items()):
             # Reuse this label's managed userids in order, then the lowest numbers nobody has.
-            ours = sorted((u for u in managed if re.fullmatch(rf"{re.escape(label)}\d+", u)),
+            ours = sorted((u for u in managed if re.fullmatch(rf"{re.escape(label)}\d+", u, re.I)),
                           key=lambda u: int(u[len(label):]))
             n = 0
             for group in groups:
                 if ours:
-                    userid = ours.pop(0)
+                    # Same number; a change of label case registers it anew and deletes the old one
+                    # (CodeProject.AI's userids are case-sensitive).
+                    userid = label + ours.pop(0)[len(label):]
                 else:
                     n += 1
                     while f"{label}{n}".lower() in taken:

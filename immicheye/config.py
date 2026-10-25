@@ -37,6 +37,7 @@ class Settings:
     save_faces: int = 0              # keep crops of the last N recognised-or-not faces (0 = off)
     tile_px: int = 1280              # also search frames larger than this in tiles (0 = off)
     lowres_px: tuple[int, ...] = ()  # also embed each reference face shrunk to these widths
+    label_case: str = "lower"        # "lower" (cal_smith) or "title" (Cal_Smith)
 
 
 def load() -> Settings:
@@ -46,6 +47,9 @@ def load() -> Settings:
     labels = _env("IMMICHEYE_LABELS", "first").lower()
     if labels not in ("first", "full"):
         raise ValueError(f"IMMICHEYE_LABELS must be first or full, not {labels!r}")
+    case = _env("IMMICHEYE_LABEL_CASE", "lower").lower()
+    if case not in ("lower", "title"):
+        raise ValueError(f"IMMICHEYE_LABEL_CASE must be lower or title, not {case!r}")
     people = tuple(p.strip() for p in _env("IMMICHEYE_PEOPLE", "").split(",") if p.strip())
     name_map = json.loads(_env("IMMICHEYE_NAME_MAP", "{}") or "{}")
     return Settings(
@@ -72,5 +76,6 @@ def load() -> Settings:
         cpai_prototypes=int(_env("IMMICHEYE_CPAI_PROTOTYPES", "4")),
         save_faces=int(_env("IMMICHEYE_SAVE_FACES", "0")),
         tile_px=int(_env("IMMICHEYE_TILE_PX", "1280")),
+        label_case=case,
         lowres_px=tuple(int(p) for p in _env("IMMICHEYE_LOWRES_PX", "32,48").split(",") if p.strip()),
     )
