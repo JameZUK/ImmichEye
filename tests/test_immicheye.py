@@ -578,3 +578,38 @@ def test_late_names_arriving_during_logout_are_not_lost(monkeypatch):
                 await task
             assert [m for _, m in updates] == ["person:86%,cal:80%", "person:86%,cal:80%,bea:70%"]
     asyncio.run(asyncio.wait_for(run(), 5))
+
+
+@respx.mock
+def test_late_names_seen_during_a_failed_update_are_retried(monkeypatch):
+    monkeypatch.setattr(blueiris, "SETTLE_S", 0)
+    monkeypatch.setattr(blueiris, "DEBOUNCE_S", 0)
+    monkeypatch.setattr(blueiris, "RETRIES", ())
+    alert_file = "Front.20260101_120000Z.1234.3-1.jpg"
+    updates = fake_blueiris([{"camera": "Front", "path": "@77.bvr", "file": alert_file, "memo": "person:86%",
+                              "flags": 0x14030002}])
+    s = dataclasses.replace(server.settings, blueiris_url="http://bi.test", blueiris_user="u", blueiris_password="p")
+
+    async def run():
+        async with httpx.AsyncClient() as c:
+            late = LateNames(s, c)
+            set_memo, calls = late.bi.set_memo, []
+
+            async def failing_once(*args):   # the first write fails while bea is being named
+                calls.append(1)
+                if len(calls) == 1:
+                    late.observe("Front", None, "Front.20260101_120007Z.jpg", [pred("bea", 0.7)])
+                    raise httpx.ConnectError("blue iris restarting")
+                await set_memo(*args)
+            late.bi.set_memo = failing_once
+            late.observe("Front", alert_key(alert_file), alert_file, [pred("cal", 0.8)])
+            while not (task := late.latest["front"].task).done():
+                await task
+            assert [m for _, m in updates] == ["person:86%,cal:80%,bea:70%"]   # both, in one retry
+            assert late.status()["failed"] == 1 and not late.tasks
+            # a failure with nothing new arriving ends the flush instead of retrying for ever
+            late.bi.set_memo = lambda *a: (_ for _ in ()).throw(httpx.ConnectError("down"))
+            late.observe("Front", None, "Front.20260101_120009Z.jpg", [pred("dan", 0.7)])
+            await asyncio.wait_for(late.latest["front"].task, 2)
+            assert late.status()["failed"] == 2
+    asyncio.run(asyncio.wait_for(run(), 5))

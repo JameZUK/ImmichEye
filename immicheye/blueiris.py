@@ -138,6 +138,7 @@ class LateNames:
         self.s = settings
         self.bi = BlueIris(settings.blueiris_url, settings.blueiris_user, settings.blueiris_password, client)
         self.latest: dict[str, _Alert] = {}   # camera -> its latest alert
+        self.tasks: set[asyncio.Task] = set()   # asyncio keeps only weak references to tasks
         self.updated = self.failed = 0
         self.last_error: str | None = None
 
@@ -163,24 +164,27 @@ class LateNames:
                 a.names[p["userid"]] = p["confidence"]
         if fresh and (a.task is None or a.task.done()):
             a.task = asyncio.create_task(self._flush(a))
+            self.tasks.add(a.task)
+            a.task.add_done_callback(self.tasks.discard)
 
     async def _flush(self, a: _Alert) -> None:
         await asyncio.sleep(max(DEBOUNCE_S, a.first + SETTLE_S - time.monotonic()))
-        # Names can arrive at any await, so go round until none are left. Each round logs in
-        # and out itself, which makes the check below the task's last step: a name observed
-        # after it finds the task done and starts a flush of its own.
-        while pending := {n: c for n, c in a.names.items() if n not in a.written}:
+        # Names can arrive at any await. Go round while there are names this flush hasn't
+        # tried yet: a failed or abandoned round ends the flush only if nothing new came in
+        # meanwhile, and a name observed after the last check finds the task done.
+        tried: set[str] = set()
+        while (pending := {n for n in a.names if n not in a.written}) - tried:
+            tried = pending
             try:
-                if not await self._write(a, pending):
-                    return
+                await self._write(a)
             except Exception as e:
                 self.failed += 1
                 self.last_error = f"{type(e).__name__}: {e}"
                 log.warning("could not add late names to %s: %s", a.file, self.last_error)
-                return
 
-    async def _write(self, a: _Alert, pending: dict[str, float]) -> bool:
-        """Add pending to the alert's memo; False if the alert has nothing to name."""
+    async def _write(self, a: _Alert) -> bool:
+        """Add the alert's names to its memo; False if the alert has nothing to name."""
+        names = dict(a.names)
         s = await self.bi.session()
         try:
             # Blue Iris writes its own memo when it confirms the alert, over anything
@@ -197,12 +201,12 @@ class LateNames:
                     log.info("%s alert %s not confirmed after %ds; names not added", a.camera, a.file, sum(RETRIES))
                 return False   # cancelled, still undecided, or never listed: nothing to name
             memo = found.get("memo") or ""
-            new = merge_memo(memo, pending)
+            new = merge_memo(memo, names)   # all of them: names already in the memo are skipped
             if new != memo:
                 await self.bi.set_memo(s, found, new)
                 self.updated += 1
                 log.info("%s alert %s memo: %r -> %r", a.camera, found["path"], memo, new)
-            a.written |= set(pending)   # names that didn't fit count as done too
+            a.written |= set(names)   # names that didn't fit count as done too
             return True
         finally:
             await self.bi.logout(s)
