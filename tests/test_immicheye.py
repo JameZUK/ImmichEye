@@ -212,6 +212,27 @@ def test_saves_face_crops(client, monkeypatch, tmp_path):
     assert len(crops) == 1 and "_cal_cal-" in crops[0].name and crops[0].name.endswith("_40px.jpg")
 
 
+def test_face_crop_cleanup_tolerates_a_crop_already_removed(client, monkeypatch, tmp_path, caplog):
+    # Two requests' threads clean up together: the other one deletes an old crop after this
+    # one has listed it.
+    monkeypatch.setattr(server, "settings", dataclasses.replace(server.settings, data_dir=tmp_path, save_faces=1))
+    server.app.state.ml = FakeML([Face((10, 20, 50, 70), 0.9, unit(0.1, 1))])
+    (tmp_path / "faces").mkdir()
+    for old in ("20000101-000000-000_0_a.jpg", "20000101-000001-000_0_b.jpg"):
+        (tmp_path / "faces" / old).write_bytes(b"x")
+    listed = type(tmp_path).glob
+
+    def racing_glob(self, pattern):
+        found = list(listed(self, pattern))
+        (tmp_path / "faces" / "20000101-000000-000_0_a.jpg").unlink(missing_ok=True)
+        return iter(found)
+    monkeypatch.setattr(type(tmp_path), "glob", racing_glob)
+    post(client)
+    assert "could not save face crops" not in caplog.text
+    assert [c.name for c in (tmp_path / "faces").iterdir()][0].endswith("_40px.jpg")
+    assert len(list((tmp_path / "faces").iterdir())) == 1
+
+
 def test_tile_boxes_cover_large_frames_with_overlap():
     from immicheye.tiles import tile_boxes
     assert tile_boxes(1280, 720, 1280) == [] and tile_boxes(3840, 2160, 0) == []
@@ -450,6 +471,15 @@ def test_merge_memo_keeps_unknown_and_fits_49_chars():
     assert merge_memo(cut[:49], {"Dan": 0.7}) == "person:94%,Bea Jones:80%,Cal Smith:71%,Dan:70%"
 
 
+def test_merge_memo_keeps_person_when_it_is_not_first():
+    # A vehicle confirmed the alert, so person sits among the other labels; Blue Iris cut the name.
+    memo = "car:95%,vehicle:53%,person:51%,unknown,Bea Smithson:73%"[:49]
+    assert merge_memo(memo, {"Bea Smithson": 0.73}) == "car:95%,Bea Smithson:73%,unknown,person:51%"
+    # person outlasts unknown and names too
+    out = merge_memo("car:95%,person:51%", {"Cal Smithson-Jones": 0.75, "Beatrice Jones": 0.74})
+    assert out == "car:95%,Cal Smithson-Jones:75%,person:51%"
+
+
 BI = "http://bi.test/json"
 
 
@@ -503,6 +533,27 @@ def test_late_names_added_to_the_alert_memo(monkeypatch):
             late.observe("Front", None, "Front.20260101_130000Z.jpg", [pred("bea")])
             assert "bea" not in late.latest["front"].names
     asyncio.run(run())
+
+
+@respx.mock
+def test_late_names_keep_person_in_a_full_vehicle_memo(monkeypatch):
+    monkeypatch.setattr(blueiris, "SETTLE_S", 0)
+    monkeypatch.setattr(blueiris, "PLAIN_HOLD_S", 0)
+    monkeypatch.setattr(blueiris, "DEBOUNCE_S", 0)
+    monkeypatch.setattr(blueiris, "RETRIES", ())
+    alert_file = "Drive.20260101_120000Z.1234.3-1.jpg"
+    memo = "car:95%,vehicle:53%,person:51%,unknown,Bea Smithson:73%"[:49]   # Blue Iris cut the name
+    updates = fake_blueiris([{"camera": "Drive", "path": "@79.bvr", "file": alert_file, "memo": memo,
+                              "flags": 0x1c030002}])
+    s = dataclasses.replace(server.settings, blueiris_url="http://bi.test", blueiris_user="u", blueiris_password="p")
+
+    async def run():
+        async with httpx.AsyncClient() as c:
+            late = LateNames(s, c)
+            late.observe("Drive", alert_key(alert_file), alert_file, [pred("Bea Smithson", 0.73)])
+            await late.latest["drive"].task
+    asyncio.run(run())
+    assert updates == [("@79.bvr", "car:95%,Bea Smithson:73%,unknown,person:51%")]
 
 
 @respx.mock

@@ -154,7 +154,7 @@ def save_face_crops(jpeg: bytes, entry: dict) -> None:
             crop.save(out / name, "JPEG", quality=90)
             f["crop"] = name
         for old in sorted(out.glob("*.jpg"))[: -settings.save_faces]:
-            old.unlink()
+            old.unlink(missing_ok=True)   # another request's thread may have removed it first
     except Exception:
         log.exception("could not save face crops")
 

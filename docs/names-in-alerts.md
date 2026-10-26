@@ -89,8 +89,10 @@ push notification or MQTT message Blue Iris already sent.
   Some apps skip labels without one.
 - **The 49-character limit.** Blue Iris keeps only the first 49 characters of any memo, its own
   included. To make room, ImmichEye leaves out other labels first (counting from the end), then
-  `unknown`, then the lowest-scoring names. After `person:NN%` there's room for two names of up
-  to 14 characters each. Keep labels short (`IMMICHEYE_LABELS=first`) if several people often
+  `unknown`, then the lowest-scoring names. The memo's first label always stays, and so does
+  `person` wherever it is (a vehicle can confirm an alert, putting `car` first), because rules
+  and apps filter on it. After `person:NN%` there's room for two names of up to 14 characters
+  each. Keep labels short (`IMMICHEYE_LABELS=first`) if several people often
   arrive together.
 - **Several people.** Each new name updates the memo again, also while an earlier update is
   still under way.

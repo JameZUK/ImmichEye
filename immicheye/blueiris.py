@@ -11,7 +11,8 @@ Updates wait until Blue Iris has confirmed the alert, as it writes its own memo 
 anything written earlier; cancelled alerts are left alone. Names go after the first label (person), ahead of "unknown" and other labels, with a
 percentage like Blue Iris's own labels: apps that read the memo (Caesa) skip labels without
 one. Blue Iris keeps only the first 49 characters of a memo, its own included, so other
-labels, then "unknown", then the lowest-scoring names are left out to make room. The push
+labels, then "unknown", then the lowest-scoring names, then person, are left out to make room.
+The push
 notification Blue Iris already sent is not changed; the alert in Blue Iris and in apps that
 read its memo is.
 """
@@ -62,8 +63,8 @@ def alert_time(filename: str) -> float | None:
 
 def merge_memo(memo: str, names: dict[str, float]) -> str:
     """memo with names (label -> confidence 0..1) after its first label and any names already
-    there, highest score first. Within MEMO_MAX, other labels go first, then "unknown", then
-    the lowest-scoring names."""
+    there, highest score first. To fit MEMO_MAX, other labels go first, then "unknown", then
+    the lowest-scoring names, and person only after all of those."""
     items = [i.strip() for i in (memo or "").split(",") if i.strip()]
     if len(memo or "") >= MEMO_MAX and items and not re.search(r":\d+%$", items[-1]) \
             and items[-1].lower() != "unknown":
@@ -80,8 +81,14 @@ def merge_memo(memo: str, names: dict[str, float]) -> str:
     unknown = [i for i in rest if label(i) == "unknown"]
     others = [i for i in rest if i not in faces and i not in unknown]
     out = first + faces + new + unknown + others
-    while len(",".join(out)) > MEMO_MAX and len(out) > 1:
-        out.pop()
+    # Order kept; what goes to make room, first to last. Person outlasts the names: rules
+    # and apps filter on it.
+    person = [i for i in others if label(i) == "person"]
+    drop = ([i for i in others if i not in person][::-1] + unknown + new[::-1] + faces[::-1] + person)
+    for i in drop:
+        if len(",".join(out)) <= MEMO_MAX:
+            break
+        out.remove(i)
     return ",".join(out)[:MEMO_MAX]
 
 
