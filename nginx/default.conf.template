@@ -23,18 +23,21 @@ server {
     set $faces http://immicheye:8000;
 
     # delete/register are answered by ImmichEye and never reach CodeProject.AI: Blue Iris's
-    # faces view deletes every face it doesn't have locally.
-    location ~ ^/v1/vision/face/(recognize|list|delete|register)$ {
+    # faces view deletes every face it doesn't have locally. Matched in any case and with a
+    # trailing slash, so no spelling of these paths slips through to CodeProject.AI.
+    # ImmichEye always answers 200; a 500 means it failed, and gets the fallback too.
+    location ~* ^/v1/vision/face/(recognize|list|delete|register)/?$ {
         proxy_pass $faces;
         proxy_connect_timeout 2s;
         proxy_read_timeout 30s;
         proxy_intercept_errors on;
-        error_page 502 503 504 = @faces_fallback_${IMMICHEYE_CPAI_FALLBACK};
+        error_page 500 502 503 504 = @faces_fallback_${IMMICHEYE_CPAI_FALLBACK};
     }
 
     location @faces_fallback_1 {
         # Only recognition may fall back: a delete or register must never reach CodeProject.AI.
-        if ($uri !~ /recognize$) {
+        default_type application/json;
+        if ($uri !~* /recognize/?$) {
             return 200 '{"success":false,"error":"ImmichEye unavailable","code":500,"moduleId":"FaceProcessing"}';
         }
         proxy_pass http://cpai;

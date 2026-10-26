@@ -345,8 +345,10 @@ Blue Iris's JSON API. `person:86%,unknown,car:83%` becomes
   notification already sent doesn't change.
 - Updates wait until Blue Iris has confirmed the alert: it writes its own memo then, over
   anything written earlier. With a long analysis window (many post-trigger images) that can
-  be 10 s or more after the trigger. Cancelled alerts aren't touched. `GET /immicheye/status` shows `late_names` (`updated`,
-  `failed`, `last_error`).
+  be 10 s or more after the trigger. Cancelled alerts aren't touched.
+- A new trigger's first frames arrive a second or two before its alert images, so names from
+  frames outside an alert wait 3 s and go to whichever alert is the camera's latest by then.
+- `GET /immicheye/status` shows `late_names` (`updated`, `failed`, `last_error`).
 - The frames after an alert come from the camera's AI settings. In testing they stopped when
   static object analysis was turned off.
 
@@ -383,8 +385,8 @@ For each frame with at least one face, ImmichEye POSTs JSON to that URL:
 - Any 2xx reply counts as delivered.
 
 Sending never slows down or breaks recognition. Events are queued in the background, and when
-200 are waiting the oldest is dropped. Each POST has a 5 s timeout and is not retried. Failures
-are logged at most once a minute. `GET /immicheye/status` shows `events` (`sent`, `failed`,
+200 are waiting, or `IMMICHEYE_EVENTS_QUEUE_MB` of camera frames, the oldest is dropped. Each
+POST has a 5 s timeout and is not retried. Failures are logged at most once a minute. `GET /immicheye/status` shows `events` (`sent`, `failed`,
 `dropped`, `last_error`). `/immicheye/explain` sends nothing.
 
 ## Accuracy
@@ -542,6 +544,7 @@ All settings go in `.env` (see `.env.example`).
 | `IMMICHEYE_EVENTS_TOKEN` | empty | Sent as `Authorization: Bearer <token>` |
 | `IMMICHEYE_EVENTS_CAMERAS` | empty (all) | Comma-separated camera short names to send, e.g. `Front,Back` |
 | `IMMICHEYE_EVENTS_FRAME_PX` | 0 (off) | Also send the whole frame, long side scaled to at most this |
+| `IMMICHEYE_EVENTS_QUEUE_MB` | 64 | Cap on camera frames waiting to be sent; the oldest are dropped first |
 
 ### What Blue Iris's minimum confidence means here
 

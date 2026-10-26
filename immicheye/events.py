@@ -3,6 +3,8 @@
 Off unless IMMICHEYE_EVENTS_URL is set. Made for SmartEye's visitor database, but any
 receiver of the same JSON works. Sending happens in the background and never slows down
 or breaks recognition: a full queue drops the oldest event, a failed POST is not retried.
+Queued events hold whole camera frames (crops are cut when sent), so the queue is capped by
+size as well as count (IMMICHEYE_EVENTS_QUEUE_MB).
 """
 import asyncio
 import base64
@@ -55,6 +57,7 @@ class EventSink:
         self.queue: asyncio.Queue = asyncio.Queue(maxsize=QUEUE_MAX)
         self.sent = self.failed = self.dropped = 0
         self.pending = 0   # submitted and not yet sent, failed or dropped
+        self.queued_bytes = 0
         self.last_error: str | None = None
         self._warned = 0.0
 
@@ -70,11 +73,13 @@ class EventSink:
         wanted = {c.lower() for c in self.s.events_cameras}
         if wanted and (camera or "").lower() not in wanted:
             return
-        if self.queue.full():
-            self.queue.get_nowait()
+        budget = self.s.events_queue_mb * 1024 * 1024
+        while not self.queue.empty() and (self.queue.full() or self.queued_bytes + len(jpeg) > budget):
+            self.queued_bytes -= len(self.queue.get_nowait()[0])   # drop the oldest
             self.dropped += 1
             self.pending -= 1
         self.queue.put_nowait((jpeg, entry, camera, faces))
+        self.queued_bytes += len(jpeg)
         self.pending += 1
 
     def payload(self, jpeg: bytes, entry: dict, camera: str | None, faces: list[dict]) -> bytes:
@@ -125,6 +130,7 @@ class EventSink:
     async def run(self) -> None:
         while True:
             item = await self.queue.get()
+            self.queued_bytes -= len(item[0])
             try:
                 await self._send(item)
             finally:

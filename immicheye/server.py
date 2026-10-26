@@ -75,15 +75,19 @@ async def lifespan(app: FastAPI):
     app.state.events = EventSink(settings, client)
     app.state.alerts = AlertNames(settings.alert_hold_ms / 1000)
     app.state.late = LateNames(settings, client)
-    tasks = [asyncio.create_task(refresh_loop(app.state.builder, app.state.cpai)),
-             asyncio.create_task(app.state.events.run())]
+    app.state.background = {asyncio.create_task(refresh_loop(app.state.builder, app.state.cpai)),
+                            asyncio.create_task(app.state.events.run())}
     yield
+    # Stop everything that may still use the HTTP client before closing it.
+    tasks = app.state.background | app.state.late.tasks
     for task in tasks:
         task.cancel()
+    await asyncio.gather(*tasks, return_exceptions=True)
     await client.aclose()
 
 
-app = FastAPI(lifespan=lifespan, docs_url=None, redoc_url=None, openapi_url=None)
+# No trailing-slash redirects: they would point Blue Iris at the internal address behind the router.
+app = FastAPI(lifespan=lifespan, docs_url=None, redoc_url=None, openapi_url=None, redirect_slashes=False)
 
 
 def cpai_envelope(body: dict, command: str, started: float) -> JSONResponse:
@@ -169,12 +173,21 @@ async def recognize(request: Request) -> Response:
     if upload is None or isinstance(upload, str):
         return cpai_envelope({"success": False, "error": "No image provided"}, "recognize", started)
     jpeg = await upload.read()
+    entry = {"ts": time.time(), "file": getattr(upload, "filename", None), "bytes": len(jpeg),
+             "min_confidence": form.get("min_confidence")}
     try:
         size = Image.open(io.BytesIO(jpeg)).size   # reads the header only
     except Exception:
-        size = None
-    entry = {"ts": time.time(), "file": getattr(upload, "filename", None), "size": list(size or ()) or None,
-             "bytes": len(jpeg), "min_confidence": form.get("min_confidence")}
+        # Not an image: answer like CodeProject.AI. It isn't an outage, so no fallback.
+        log_recognition({**entry, "error": "not an image"})
+        return cpai_envelope({"success": False, "error": "Unable to read the image"}, "recognize", started)
+    entry["size"] = list(size)
+    camera, alert = camera_of(entry["file"]), alert_key(entry["file"])
+    if alert:
+        # Late names learns of a new alert as soon as its first image arrives, not after
+        # detection and the sharing hold: names from the new trigger's other frames are
+        # credited to it instead of to the camera's previous alert.
+        request.app.state.late.observe(camera, alert, entry["file"], [])
 
     t = time.perf_counter()
     try:
@@ -206,14 +219,13 @@ async def recognize(request: Request) -> Response:
         events.append({**logged[-1], "score": round(best.score, 3), "embedding": f.embedding})
 
     entry.update(ms=inference_ms, faces=logged)
-    alert = alert_key(entry["file"])
     if alert and settings.alert_share:
         predictions, shared, entry["held_ms"] = await request.app.state.alerts.share(alert, predictions)
         if shared:
             entry["shared"] = shared
         if entry["held_ms"] and await request.is_disconnected():
             entry["gave_up"] = True   # Blue Iris stopped waiting for this reply
-    request.app.state.late.observe(camera_of(entry["file"]), alert, entry["file"], predictions)
+    request.app.state.late.observe(camera, alert, entry["file"], predictions)
     request.app.state.events.submit(jpeg, entry, events)
     await asyncio.to_thread(save_face_crops, jpeg, entry)   # decodes the whole frame
     log_recognition(entry)
@@ -279,25 +291,31 @@ async def status(request: Request) -> dict:
 
 
 @app.post("/immicheye/explain")
-async def explain(request: Request) -> dict:
+async def explain(request: Request) -> Response:
     """Every face in a posted image with its five best matches, for tuning the thresholds.
 
     curl -F image=@frame.jpg http://<host>:8000/immicheye/explain
     """
     upload = (await request.form()).get("image")
     if upload is None or isinstance(upload, str):
-        return {"error": "post the image as multipart field 'image'"}
+        return JSONResponse({"error": "post the image as multipart field 'image'"}, 400)
     jpeg = await upload.read()
-    size = Image.open(io.BytesIO(jpeg)).size
+    try:
+        size = Image.open(io.BytesIO(jpeg)).size
+    except Exception:
+        return JSONResponse({"error": "not an image"}, 400)
     faces, _ = await detect(request.app.state.ml, jpeg, settings.detect_min_score, settings.tile_px, size)
-    return {"faces": [{
+    return JSONResponse({"faces": [{
         "box": list(f.box),
         "det": round(f.score, 3),
         "matches": [[m.label, round(m.score, 3)] for m in state["gallery"].match(f.embedding, settings.top_k)[:5]],
-    } for f in faces]}
+    } for f in faces]})
 
 
 @app.post("/immicheye/refresh")
 async def trigger_refresh(request: Request) -> dict:
-    asyncio.create_task(refresh(request.app.state.builder, request.app.state.cpai))
-    return {"started": not state["refreshing"]}
+    started = not state["refreshing"]
+    task = asyncio.create_task(refresh(request.app.state.builder, request.app.state.cpai))
+    request.app.state.background.add(task)   # asyncio keeps only weak references to tasks
+    task.add_done_callback(request.app.state.background.discard)
+    return {"started": started}

@@ -35,6 +35,7 @@ DEBOUNCE_S = 2.0  # gather names arriving together into one update
 RETRIES = (3, 6, 12, 24)   # seconds to wait for Blue Iris to list, then confirm or cancel, the alert
 KEEP_FLAGS = 2            # FLAGGED: a memo-only update clears it
 CONFIRMED, CANCELLED, OCCUPIED = 1 << 28, 1 << 23, 1 << 29
+PLAIN_HOLD_S = 3.0     # names from frames outside an alert wait this long to see if a new alert starts
 RETRY_AFTER_S = 10.0   # after a failed or undecided update, names seen again retry no sooner than this
 # Labels Blue Iris's object models give (COCO, plus its own); anything else in a memo is a face.
 OBJECTS = {
@@ -151,15 +152,34 @@ class LateNames:
         return bool(self.s.blueiris_url and self.s.blueiris_user)
 
     def observe(self, camera: str | None, alert: str | None, filename: str | None, predictions: list[dict]) -> None:
-        """One reply: alert images open or feed their alert, other frames feed the camera's latest."""
+        """One reply: alert images open or feed their alert, other frames feed the camera's latest.
+
+        A new trigger's first frames arrive a second or two before its alert images. So names
+        from frames outside an alert are credited PLAIN_HOLD_S later, to whichever alert is the
+        camera's latest by then, rather than to the previous alert."""
         if not self.enabled or not camera:
             return
-        key = camera.lower()
-        now = time.monotonic()
+        key, now = camera.lower(), time.monotonic()
+        if alert:
+            a = self.latest.get(key)
+            if a is None or a.file.lower() != alert:
+                a = self.latest[key] = _Alert(camera, filename, now)
+            self._credit(a, predictions, now)
+        elif any(p["userid"] != "unknown" for p in predictions):
+            if PLAIN_HOLD_S > 0:
+                asyncio.get_running_loop().call_later(PLAIN_HOLD_S, self._credit_latest, key, predictions, now)
+            else:
+                self._credit_latest(key, predictions, now)
+
+    def _credit_latest(self, key: str, predictions: list[dict], seen: float) -> None:
         a = self.latest.get(key)
-        if alert and (a is None or a.file.lower() != alert):
-            a = self.latest[key] = _Alert(camera, filename, now)
-        if a is None or now - a.first > self.s.late_names_s:
+        # Only frames from the alert's own trigger: no older than the alert (allowing for the
+        # frames just before its images) and within the late-names window.
+        if a is not None and a.first - PLAIN_HOLD_S <= seen <= a.first + self.s.late_names_s:
+            self._credit(a, predictions, time.monotonic())
+
+    def _credit(self, a: _Alert, predictions: list[dict], now: float) -> None:
+        if now - a.first > self.s.late_names_s + PLAIN_HOLD_S:
             return
         fresh = False
         for p in predictions:

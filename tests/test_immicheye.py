@@ -24,7 +24,7 @@ from immicheye.alerts import AlertNames, alert_key  # noqa: E402
 from immicheye.blueiris import LateNames, merge_memo  # noqa: E402
 from immicheye.gallery import Gallery, GalleryBuilder, labels_for  # noqa: E402
 from immicheye.immich import FaceRef, Immich, Person  # noqa: E402
-from immicheye.ml import Face  # noqa: E402
+from immicheye.ml import Face, ImmichML  # noqa: E402
 from immicheye.tiles import tile_boxes  # noqa: E402
 
 
@@ -481,6 +481,7 @@ def fake_blueiris(alerts):
 @respx.mock
 def test_late_names_added_to_the_alert_memo(monkeypatch):
     monkeypatch.setattr(blueiris, "SETTLE_S", 0)
+    monkeypatch.setattr(blueiris, "PLAIN_HOLD_S", 0)
     monkeypatch.setattr(blueiris, "DEBOUNCE_S", 0)
     monkeypatch.setattr(blueiris, "RETRIES", ())
     alert_file = "Front.20260101_120000Z.1234.3-1.jpg"
@@ -507,6 +508,7 @@ def test_late_names_added_to_the_alert_memo(monkeypatch):
 @respx.mock
 def test_late_names_arriving_during_an_update_are_not_lost(monkeypatch):
     monkeypatch.setattr(blueiris, "SETTLE_S", 0)
+    monkeypatch.setattr(blueiris, "PLAIN_HOLD_S", 0)
     monkeypatch.setattr(blueiris, "DEBOUNCE_S", 0)
     monkeypatch.setattr(blueiris, "RETRIES", ())
     alert_file = "Front.20260101_120000Z.1234.3-1.jpg"
@@ -532,6 +534,7 @@ def test_late_names_arriving_during_an_update_are_not_lost(monkeypatch):
 @respx.mock
 def test_late_names_wait_for_blue_iris_to_confirm(monkeypatch):
     monkeypatch.setattr(blueiris, "SETTLE_S", 0)
+    monkeypatch.setattr(blueiris, "PLAIN_HOLD_S", 0)
     monkeypatch.setattr(blueiris, "DEBOUNCE_S", 0)
     monkeypatch.setattr(blueiris, "RETRIES", (0.05, 0.05, 0.05))
     alert_file = "Front.20260101_120000Z.1234.3-1.jpg"
@@ -558,6 +561,7 @@ def test_late_names_wait_for_blue_iris_to_confirm(monkeypatch):
 @respx.mock
 def test_late_names_arriving_during_logout_are_not_lost(monkeypatch):
     monkeypatch.setattr(blueiris, "SETTLE_S", 0)
+    monkeypatch.setattr(blueiris, "PLAIN_HOLD_S", 0)
     monkeypatch.setattr(blueiris, "DEBOUNCE_S", 0)
     monkeypatch.setattr(blueiris, "RETRIES", ())
     alert_file = "Front.20260101_120000Z.1234.3-1.jpg"
@@ -584,6 +588,7 @@ def test_late_names_arriving_during_logout_are_not_lost(monkeypatch):
 @respx.mock
 def test_late_names_seen_during_a_failed_update_are_retried(monkeypatch):
     monkeypatch.setattr(blueiris, "SETTLE_S", 0)
+    monkeypatch.setattr(blueiris, "PLAIN_HOLD_S", 0)
     monkeypatch.setattr(blueiris, "DEBOUNCE_S", 0)
     monkeypatch.setattr(blueiris, "RETRIES", ())
     alert_file = "Front.20260101_120000Z.1234.3-1.jpg"
@@ -619,6 +624,7 @@ def test_late_names_seen_during_a_failed_update_are_retried(monkeypatch):
 @respx.mock
 def test_late_names_retry_when_seen_again_after_a_failure(monkeypatch):
     monkeypatch.setattr(blueiris, "SETTLE_S", 0)
+    monkeypatch.setattr(blueiris, "PLAIN_HOLD_S", 0)
     monkeypatch.setattr(blueiris, "DEBOUNCE_S", 0)
     monkeypatch.setattr(blueiris, "RETRIES", ())
     monkeypatch.setattr(blueiris, "RETRY_AFTER_S", 0.2)
@@ -741,3 +747,127 @@ def test_gallery_build_keeps_previous_gallery_when_immich_returns_little(tmp_pat
         asyncio.run(b.build())
     assert len(asyncio.run(b.build())) == 1
     assert [p.stem for p in (tmp_path / "crops").glob("*.jpg")] == ["f-p0"]
+
+
+def test_events_queue_capped_by_size(client):
+    sink = events_on(client, events_queue_mb=1)
+    face = [{"box": [0, 0, 1, 1], "det": 0.9, "result": "cal", "score": 0.6, "top": [], "embedding": unit(1)}]
+    big = b"x" * (400 * 1024)
+    server.app.state.events.queue = asyncio.Queue(maxsize=200)   # unattended: nothing drains it
+    sink.queued_bytes = sink.dropped = sink.pending = 0
+    for i in range(5):
+        sink.submit(big, {"ts": i, "file": f"Front.{i}.jpg"}, face)
+    assert sink.queue.qsize() == 2 and sink.queued_bytes == 2 * len(big) and sink.dropped == 3
+    assert [item[1]["ts"] for item in list(sink.queue._queue)] == [3, 4]   # the oldest went
+
+
+def test_recognize_rejects_a_non_image_without_counting_an_outage(client):
+    before = server.state["unavailable"]
+    body = client.post("/v1/vision/face/recognize",
+                       files={"image": ("Front.x.jpg", b"not a jpeg", "image/jpeg")}).json()
+    assert body["success"] is False and body["error"] == "Unable to read the image"
+    assert server.state["unavailable"] == before
+    r = client.post("/immicheye/explain", files={"image": ("x.jpg", b"not a jpeg", "image/jpeg")})
+    assert r.status_code == 400
+
+
+def test_late_names_from_a_new_triggers_first_frames_go_to_the_new_alert(monkeypatch):
+    monkeypatch.setattr(blueiris, "PLAIN_HOLD_S", 0.1)
+    s = dataclasses.replace(server.settings, blueiris_url="http://bi.test", blueiris_user="u", blueiris_password="p")
+    first, second = "Front.20260101_120000Z.1234.3-1.jpg", "Front.20260101_120030Z.1240.3-1.jpg"
+
+    async def run():
+        async with httpx.AsyncClient() as c:
+            late = LateNames(s, c)
+            late._flush = lambda a: asyncio.sleep(0)          # names only; no Blue Iris here
+            late.observe("Front", alert_key(first), first, [pred("cal")])
+            old = late.latest["front"]
+            # 30 s later Bea arrives: a plain frame of the new trigger, then its alert images
+            late.observe("Front", None, "Front.20260101_120029Z.jpg", [pred("bea")])
+            late.observe("Front", alert_key(second), second, [pred("unknown")])
+            await asyncio.sleep(0.15)
+            assert set(old.names) == {"cal"} and set(late.latest["front"].names) == {"bea"}
+            # without a new alert, a later frame still counts for the current one
+            late.observe("Front", None, "Front.20260101_120035Z.jpg", [pred("dan")])
+            await asyncio.sleep(0.15)
+            assert set(late.latest["front"].names) == {"bea", "dan"}
+    asyncio.run(run())
+
+
+@respx.mock
+def test_immich_paging():
+    pages = {1: {"people": [{"id": "1", "name": "Cal"}], "hasNextPage": True},
+             2: {"people": [{"id": "2", "name": "Bea"}], "hasNextPage": False}}
+    respx.get("http://immich.test/api/people").mock(
+        side_effect=lambda r: httpx.Response(200, json=pages[int(r.url.params["page"])]))
+    search = respx.post("http://immich.test/api/search/metadata").mock(side_effect=lambda r: httpx.Response(200, json={
+        "assets": {"items": [{"id": f"a{json.loads(r.content)['page']}-{i}"} for i in range(json.loads(r.content)["size"])],
+                   "nextPage": str(json.loads(r.content)["page"] + 1)}}))
+
+    async def run():
+        async with httpx.AsyncClient() as c:
+            immich = Immich("http://immich.test", "k", c)
+            return await immich.people(), await immich.recent_assets("1", 300)
+    people, assets = asyncio.run(run())
+    assert [p.name for p in people] == ["Cal", "Bea"]
+    assert len(assets) == 300 and assets[0] == "a1-0" and assets[-1] == "a2-49" and search.call_count == 2
+
+
+@respx.mock
+def test_ml_parses_and_normalises_embeddings():
+    raw = [3.0, 4.0] + [0.0] * 510
+    respx.post("http://ml.test/predict").respond(json={"facial-recognition": [
+        {"boundingBox": {"x1": 1.6, "y1": 2, "x2": 30, "y2": 40}, "score": 0.9, "embedding": json.dumps(raw)},
+        {"boundingBox": {"x1": 5, "y1": 5, "x2": 9, "y2": 9}, "score": 0.8, "embedding": raw}]})
+
+    async def run():
+        async with httpx.AsyncClient() as c:
+            return await ImmichML("http://ml.test", "buffalo_l", c).faces(b"jpeg", 0.7)
+    a, b = asyncio.run(run())
+    assert a.box == (1, 2, 30, 40) and a.score == pytest.approx(0.9)
+    assert np.linalg.norm(a.embedding) == pytest.approx(1) and a.embedding[:2] == pytest.approx([0.6, 0.8])
+    assert np.allclose(a.embedding, b.embedding)   # a JSON string and a list parse alike
+
+
+def test_blue_iris_password_must_be_latin1(monkeypatch):
+    monkeypatch.setenv("IMMICHEYE_BLUEIRIS_PASSWORD", "café")
+    assert config.load().blueiris_password == "café"
+    monkeypatch.setenv("IMMICHEYE_BLUEIRIS_PASSWORD", "密码")
+    with pytest.raises(ValueError, match="Latin-1"):
+        config.load()
+
+
+def test_router_template():
+    import pathlib
+    import re
+    tpl = (pathlib.Path(__file__).parent.parent / "nginx" / "default.conf.template").read_text()
+    faces = re.search(r"location ~\* (\S+) \{", tpl).group(1)
+    for path in ("/v1/vision/face/recognize", "/v1/vision/face/DELETE", "/v1/vision/face/register/",
+                 "/v1/vision/face/List"):
+        assert re.match(faces, path, re.I), path            # face management never reaches CodeProject.AI
+    for path in ("/v1/vision/detection", "/v1/vision/face", "/v1/vision/face/recognize/x"):
+        assert not re.match(faces, path, re.I), path
+    for value in ("0", "1"):                                # IMMICHEYE_CPAI_FALLBACK is 0 or 1 (config.py)
+        rendered = tpl.replace("${IMMICHEYE_CPAI_FALLBACK}", value)
+        target = re.search(r"error_page ([\d ]+)= (@\S+);", rendered)
+        assert "500" in target.group(1).split() and f"location {target.group(2)} {{" in rendered
+    for block in re.findall(r"location @faces_fallback_\d \{(.*?)\n    \}", tpl, re.S):
+        assert "default_type application/json;" in block
+
+
+def test_new_alert_is_known_to_late_names_before_its_sharing_hold(client, monkeypatch):
+    monkeypatch.setattr(blueiris, "PLAIN_HOLD_S", 0.3)
+    monkeypatch.setattr(server, "settings", dataclasses.replace(server.settings, alert_share=True, alert_hold_ms=1000))
+    late = server.app.state.late
+    late.s = dataclasses.replace(server.settings, blueiris_url="http://bi.test", blueiris_user="u")
+    late._flush = lambda a: asyncio.sleep(0)
+    server.app.state.alerts.hold_s = 1.0
+    server.app.state.ml = FakeML([])
+    post_as(client, "Front.20260101_120000Z.1234.3-1.jpg")              # alert A (held 1 s: no name)
+    server.app.state.ml = FakeML([Face((10, 20, 50, 70), 0.9, unit(0.1, 1))])
+    post_as(client, "Front.20260101_120030Z.jpg")                       # a new trigger's first frame: cal
+    server.app.state.ml = FakeML([])
+    post_as(client, "Front.20260101_120031Z.1240.3-1.jpg")              # alert B, held 1 s with no name
+    time.sleep(0.4)
+    assert late.latest["front"].file == "Front.20260101_120031Z.1240.3-1.jpg"
+    assert set(late.latest["front"].names) == {"cal"}
